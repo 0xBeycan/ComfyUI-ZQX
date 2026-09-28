@@ -10,17 +10,20 @@ and bright masses are) without copying any detail.
 Let eps ~ N(0, I) be the sampler's noise and r the reference latent,
 standardised per (batch, channel) to zero mean / unit std and resized to the
 noise resolution.  With F = FFT2 over (H, W), H(f) in [0,1] the low-pass
-filter and alpha in [0,1] the strength:
+filter and alpha in [0,1] the strength, per frequency bin f:
 
-    c      = sqrt( sum |H F(eps)|^2 / sum |H F(r)|^2 )            (per batch, channel)
-    F(out) = H * ( sqrt(1 - alpha) F(eps) + sqrt(alpha) c F(r) ) + (1 - H) * F(eps)
-    out    = Re IFFT2(F(out))
+    b(f)   = sqrt(alpha) * H(f)          (reference weight)
+    a(f)   = sqrt(1 - alpha * H(f)^2)    (noise weight;  a^2 + b^2 = 1 in every bin)
+    c      = sqrt( sum H^2 |F(eps)|^2 / sum H^2 |F(r)|^2 )        (per batch, channel)
+    F(out) = a F(eps) + b c F(r),        out = Re IFFT2(F(out))
 
-* The high band is exactly the noise's.  With alpha = 1 and an ideal filter the
-  low band is exactly  c * LPF(r).
-* c matches the reference band energy to the noise band energy it replaces,
-  so the output keeps unit variance (the two low-band terms have energies
-  (1-alpha)E and alpha E; their cross term has zero expectation).
+* Where H = 0 (high band) the output spectrum is exactly the noise's.  With an
+  ideal filter and alpha = 1 the low band is exactly c * LPF(r); with alpha < 1
+  it is sqrt(1-alpha) LPF(eps) + sqrt(alpha) c LPF(r).
+* a^2 + b^2 = 1 per bin plus the H^2-weighted energy match c keep the expected
+  energy equal to the noise's, i.e. unit variance, also for soft (Gaussian /
+  Butterworth) filters.  (FreeInit's plain LPF(z) + (1 - LPF)(eps) complement
+  loses the 2 H (1 - H) cross energy and ends up below unit variance.)
 * alpha = 0 returns the noise tensor unchanged (short-circuit, bitwise identical).
 """
 from __future__ import annotations
@@ -120,8 +123,10 @@ def lowfreq_mix(noise: torch.Tensor, ref: torch.Tensor, strength: float, cutoff:
     if torch.any(e_ref <= 0):
         raise ValueError("reference latent has no energy in the low-frequency band (constant image?)")
     cscale = torch.sqrt(e_noise / e_ref)
-    a = float(strength)
-    f_out = hfilt * (math.sqrt(1.0 - a) * fe + math.sqrt(a) * cscale * fr) + (1.0 - hfilt) * fe
+    alpha = float(strength)
+    w_ref = math.sqrt(alpha) * hfilt
+    w_noise = torch.sqrt(torch.clamp(1.0 - alpha * hfilt ** 2, min=0.0))
+    f_out = w_noise * fe + w_ref * cscale * fr
     out = torch.fft.ifft2(f_out).real
     if squeeze_t:
         out = out.reshape(b, t, c, h, w).permute(0, 2, 1, 3, 4)
