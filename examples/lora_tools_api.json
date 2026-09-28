@@ -1,0 +1,72 @@
+{
+ "1": {
+  "class_type": "UNETLoader",
+  "inputs": {
+   "unet_name": "z_image_turbo_bf16.safetensors",
+   "weight_dtype": "default"
+  }
+ },
+ "2": {
+  "class_type": "ZQXLoRAConflictReport",
+  "inputs": {
+   "model": [
+    "1",
+    0
+   ],
+   "lora_1": "my_character_zit.safetensors",
+   "lora_2": "my_realism_zit.safetensors",
+   "top_density": 0.2,
+   "sign_stats": true
+  }
+ },
+ "3": {
+  "class_type": "ZQXLoRAArithmetic",
+  "inputs": {
+   "model": [
+    "1",
+    0
+   ],
+   "lora_1": "my_character_zit.safetensors",
+   "lora_2": "my_realism_zit.safetensors",
+   "mode": "clean_col",
+   "lam": 0.5,
+   "w1": 1.0,
+   "w2": 0.7,
+   "density": 0.2,
+   "dare_drop": 0.0,
+   "svd_rank": 64,
+   "seed": 0,
+   "filename_prefix": "char_clean",
+   "save_dtype": "bfloat16"
+  }
+ },
+ "4": {
+  "class_type": "ZQXKLoRA",
+  "inputs": {
+   "model": [
+    "1",
+    0
+   ],
+   "character_lora": "my_character_zit.safetensors",
+   "realism_lora": "my_realism_zit.safetensors",
+   "character_strength": 1.0,
+   "realism_strength": 0.8,
+   "alpha": 1.5,
+   "beta": 0.5,
+   "pattern": "s",
+   "scope": "attention",
+   "other_layers": "both",
+   "allow_unmatched_keys": false
+  }
+ },
+ "5": {
+  "class_type": "ZQXBlockSpec",
+  "inputs": {
+   "index": 0,
+   "width": 5,
+   "total_blocks": 30,
+   "mode": "only",
+   "weight": 0.0
+  }
+ }
+}

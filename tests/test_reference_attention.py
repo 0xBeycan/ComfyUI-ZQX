@@ -335,3 +335,49 @@ def test_refuses_unsupported():
     m, _ = _install(p, tm.qwen_latent(8, 8))
     with pytest.raises(ValueError):
         _install(m, tm.qwen_latent(8, 8))                         # double install
+
+
+def test_zimage_fused_rope_kernel_matches_rotation_composition():
+    """Z-Image applies RoPE with comfy_kitchen's fused rms_rope kernel.  Shifting the model's own image positions
+    by delta (rope_options shift_x / shift_y) must rotate the block-0 keys exactly like R(delta) does
+    (no refiner layers, so block-0 inputs are identical in both runs)."""
+    import comfy.supported_models as sm
+    import tiny_models as tm
+    from zqx.adapters import get_adapter
+    from zqx.core.rope import apply_rotation
+    cfg = dict(image_model="lumina2", patch_size=2, in_channels=16, dim=256, cap_feat_dim=32, n_layers=1,
+               n_refiner_layers=0, qk_norm=True, n_heads=4, n_kv_heads=4, axes_dims=[16, 24, 24],
+               axes_lens=[1536, 512, 512], rope_theta=256.0, ffn_dim_multiplier=8.0 / 3.0,
+               z_image_modulation=True, time_scale=1000.0, pad_tokens_multiple=32)
+    mc = sm.ZImage(cfg)
+    mc.set_inference_dtype(torch.float32, None)
+    model = mc.get_model({}, device="cpu")
+    tm._init(model, 0)
+    p = tm.make_patcher(model)
+    ad = get_adapter(p)
+    x = tm.zimage_latent(8, 12, seed=2)
+    ctx = tm.zimage_cond(1)[0][0]
+    keys = {}
+
+    def run(shift_x, shift_y, tag):
+        q = p.clone()
+
+        def spy(func, *args, **kwargs):
+            to = kwargs["transformer_options"]
+            if to.get("block_index") == 0:
+                k = args[1]
+                n_img = 4 * 6
+                start = k.shape[2] - (n_img + ((-n_img) % 32))
+                keys[tag] = k[:, :, start:start + n_img].clone()
+            return func(*args, **kwargs)
+        to = q.model_options.setdefault("transformer_options", {})
+        to["optimized_attention_override"] = spy
+        to["rope_options"] = {"scale_x": 1.0, "shift_x": shift_x, "scale_y": 1.0, "shift_y": shift_y}
+        tm.direct_call(q, x, 0.6, ctx)
+
+    run(0.0, 0.0, "base")
+    run(5.0, 3.0, "shift")
+    rot = ad.rotation_for_offset((0.0, 3.0, 5.0), "cpu")
+    moved = apply_rotation(keys["base"], rot)
+    assert torch.allclose(moved, keys["shift"], atol=5e-5), (moved - keys["shift"]).abs().max()
+    assert not torch.allclose(keys["base"], keys["shift"], atol=1e-3)

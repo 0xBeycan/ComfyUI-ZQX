@@ -1,0 +1,18 @@
+[project]
+name = "comfyui-zit-qie-experimental"
+description = "Training-free experimental nodes for Z-Image Turbo, Qwen-Image 2512 and Qwen-Image-Edit 2511: reference attention, sigma-scheduled LoRA, K-LoRA, LoRA arithmetic, CADS, low-frequency noise, sigma-split guidance."
+version = "0.1.0"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/0xBeycan/ComfyUI-ZIT-QIE-Experimental"
+
+[tool.comfy]
+PublisherId = "0xbeycan"
+DisplayName = "ComfyUI-ZIT-QIE-Experimental"
+Icon = ""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
