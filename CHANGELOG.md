@@ -12,4 +12,7 @@ First release.
   KnOTS-aligned TIES/DARE, dense TIES + SVD; model-key-space mapping for kohya/peft/ai-toolkit/musubi formats.
 - **ZQX CADS** (arXiv 2310.17347), **ZQX Low-Frequency Noise** (variance-preserving FreeInit-style composition),
   **ZQX Sigma Split Guider** (interval CFG + base-model early steps), **ZQX Sigmas To Text**, **ZQX Block Spec**.
-- Docs: RESEARCH, DESIGN, NODES (Turkish), TEST_RESULTS; example API workflows; 93 tests + end-to-end API test.
+- Docs: RESEARCH, DESIGN, NODES, TEST_RESULTS; example API workflows; 93 tests + end-to-end API test.
+
+## 0.1.1 — 2026-09-28
+- README.md and docs/NODES.md translated to English (the whole repository is now English).
