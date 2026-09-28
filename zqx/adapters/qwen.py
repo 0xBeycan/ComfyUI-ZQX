@@ -28,6 +28,23 @@ class QwenImageAdapter(ModelAdapter):
     import re as _re
     block_key_re = _re.compile(r"(?:^|\.)transformer_blocks\.(\d+)\.")
     group_rules = []
+    # (RMSNorm module path, Linear weight key) of the text input projection (UCE edits this layer)
+    text_input_projection = ("diffusion_model.txt_norm", "diffusion_model.txt_in.weight")
+    stream_rules = [
+        (r"\.(img_mod|txt_mod)\.|(^|\.)(time_text_embed|norm_out)\.", "nonspatial"),
+        (r"\.attn\.(add_q_proj|add_k_proj|add_v_proj|to_add_out)\.|\.txt_mlp\.|(^|\.)txt_in\.", "text"),
+        (r"\.attn\.(to_q|to_k|to_v|to_out)\.|\.img_mlp\.|(^|\.)(img_in|proj_out)\.", "image"),
+    ]
+    module_kind_rules = [
+        (r"\.attn\.(add_q_proj|add_k_proj|add_v_proj|to_add_out)\.", "text"),
+        (r"\.txt_mlp\.", "text"),
+        (r"(^|\.)txt_in\.", "text"),
+        (r"\.(img_mod|txt_mod)\.", "modulation"),
+        (r"(^|\.)(time_text_embed|norm_out)\.", "modulation"),
+        (r"\.attn\.(to_q|to_k|to_v|to_out)\.", "attention"),
+        (r"\.img_mlp\.", "mlp"),
+        (r"(^|\.)(img_in|proj_out)\.", "io"),
+    ]
 
     @classmethod
     def matches(cls, dm) -> bool:
@@ -92,3 +109,7 @@ class QwenImageAdapter(ModelAdapter):
         ids[..., 1] = hh[:, None]
         ids[..., 2] = ww[None, :]
         return ids.reshape(-1, 3)
+
+    def image_ids_for_span(self, x: torch.Tensor, s0: int, transformer_options=None) -> torch.Tensor:
+        """Qwen image ids do not depend on the text length."""
+        return self.image_position_ids(x)

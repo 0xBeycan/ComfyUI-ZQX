@@ -25,6 +25,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import torch
 
 from ..core.schedule import sigma_from_transformer_options
+from . import passes
 
 
 StrengthFn = Callable[[float], float]
@@ -39,6 +40,7 @@ class RuntimeLoraPatch:
         self.entries: Dict[str, List[Tuple[StrengthFn, object, object, object]]] = {}
         self.eval_log: List[Tuple[float, str, float]] = []   # (sigma, key, strength) of the last run; for tests
         self.log_enabled = False
+        self.enabled = True   # toggled by LoRA guidance to evaluate the model without this LoRA
 
     def add(self, model_key: str, strength_fn: StrengthFn, lora_adapter, offset=None, function=None):
         self.entries.setdefault(model_key, []).append((strength_fn, lora_adapter, offset, function))
@@ -49,7 +51,7 @@ class RuntimeLoraPatch:
         prev = self.sigma
         self.sigma = sigma_from_transformer_options(to)
         try:
-            return executor(*args, **kwargs)
+            return passes.call(executor, args, kwargs)
         finally:
             self.sigma = prev
 
@@ -60,6 +62,8 @@ class RuntimeLoraPatch:
         entries = self.entries[model_key]
 
         def weight_fn(weight: torch.Tensor) -> torch.Tensor:
+            if not self.enabled:
+                return weight
             sigma = self.sigma
             if sigma is None:
                 raise RuntimeError(f"ZQX runtime LoRA: weight {model_key} evaluated outside a sampling call (no sigma).")

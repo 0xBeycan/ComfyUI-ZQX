@@ -6,12 +6,53 @@ import torch
 from ..adapters import get_adapter
 from ..patches.lora_schedules import klora_entries, klora_switch_sigmas, scheduled_entries
 from ..patches.runtime_lora import install_runtime_lora, load_lora_patches
-from .common import CATEGORY, sigma_input
+from .common import CAT_LORA, sigma_input
 
 
 def _lora_list():
     import folder_paths
     return folder_paths.get_filename_list("loras")
+
+
+SAVE_DTYPES = ["float16", "bfloat16", "float32"]
+
+
+def save_lora_file(factors, stem, save_dtype, meta):
+    """Write factors (model-key space) to models/loras/zqx/<stem>_NNNN.safetensors; returns (path, relative name)."""
+    import folder_paths
+    from safetensors.torch import save_file
+    from ..core.lora_io import factors_to_state_dict
+    if not factors:
+        raise ValueError("ZQX: the resulting LoRA is empty (every weight was dropped)")
+    dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[save_dtype]
+    root = folder_paths.get_folder_paths("loras")[0]
+    out_dir = os.path.join(root, "zqx")
+    os.makedirs(out_dir, exist_ok=True)
+    i = 0
+    while True:
+        fn = os.path.join(out_dir, f"{stem}_{i:04d}.safetensors")
+        if not os.path.exists(fn):
+            break
+        i += 1
+    meta = dict(meta)
+    meta.setdefault("zqx_format", "ComfyUI generic keys (diffusion_model.<weight>), alpha = rank")
+    save_file(factors_to_state_dict(factors, dtype), fn, metadata={k: str(v) for k, v in meta.items()})
+    return fn, os.path.relpath(fn, root)
+
+
+def write_report(lora_path, obj):
+    with open(lora_path[:-len(".safetensors")] + "_report.json", "w") as f:
+        json.dump(obj, f, indent=1, default=str)
+
+
+def load_model_space(model, name):
+    """Load a LoRA file and map it to model-weight-key space; refuses unmapped modules."""
+    from ..patches.lora_arith import lora_to_model_space
+    sd, path = _load_lora_file(name)
+    f, via, un = lora_to_model_space(model, sd)
+    if un:
+        raise ValueError(f"ZQX: {name}: unmapped LoRA modules (refusing to drop them): {un[:10]}")
+    return f, via, path
 
 
 def _load_lora_file(name):
@@ -46,7 +87,7 @@ class ZQXScheduledLoRA:
     RETURN_TYPES = ("MODEL", "STRING")
     RETURN_NAMES = ("model", "report")
     FUNCTION = "apply"
-    CATEGORY = CATEGORY
+    CATEGORY = CAT_LORA
 
     def apply(self, model, lora_name, strength_early, strength_late, sigma_hi, sigma_lo, block_weights, allow_unmatched_keys):
         sd, _ = _load_lora_file(lora_name)
@@ -92,7 +133,7 @@ class ZQXKLoRA:
     RETURN_TYPES = ("MODEL", "STRING")
     RETURN_NAMES = ("model", "report")
     FUNCTION = "apply"
-    CATEGORY = CATEGORY
+    CATEGORY = CAT_LORA
 
     def apply(self, model, character_lora, realism_lora, character_strength, realism_strength, alpha, beta, pattern,
               scope, other_layers, allow_unmatched_keys):
@@ -135,19 +176,16 @@ class ZQXLoRAArithmetic:
             "svd_rank": ("INT", {"default": 64, "min": 1, "max": 1024, "tooltip": "Output rank for ties_dense."}),
             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             "filename_prefix": ("STRING", {"default": "zqx_merge"}),
-            "save_dtype": (["float16", "bfloat16", "float32"], {"default": "float32"}),
+            "save_dtype": (SAVE_DTYPES, {"default": "float32"}),
         }}
 
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("lora_file", "report")
     FUNCTION = "run"
-    CATEGORY = CATEGORY
+    CATEGORY = CAT_LORA
     OUTPUT_NODE = True
 
     def run(self, model, lora_1, lora_2, mode, lam, w1, w2, density, dare_drop, svd_rank, seed, filename_prefix, save_dtype):
-        import folder_paths
-        from safetensors.torch import save_file
-        from ..core.lora_io import factors_to_state_dict
         from ..patches.lora_arith import combine, conflict_report, lora_to_model_space
 
         sd1, p1 = _load_lora_file(lora_1)
@@ -157,30 +195,18 @@ class ZQXLoRAArithmetic:
         if un1 or un2:
             raise ValueError(f"ZQX LoRA Arithmetic: unmapped LoRA modules (refusing to drop them): {(un1 + un2)[:10]}")
         res, info = combine(f1, f2, mode, lam, w1, w2, density, svd_rank, dare_drop, seed)
-        dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[save_dtype]
-        out_sd = factors_to_state_dict(res, dtype)
-        out_dir = os.path.join(folder_paths.get_folder_paths("loras")[0], "zqx")
-        os.makedirs(out_dir, exist_ok=True)
-        i = 0
-        while True:
-            fn = os.path.join(out_dir, f"{filename_prefix}_{mode}_{i:04d}.safetensors")
-            if not os.path.exists(fn):
-                break
-            i += 1
         txt, js = conflict_report(get_adapter(model), f1, f2, density, dense=True)
         meta = {"zqx_mode": mode, "zqx_lam": str(lam), "zqx_w1": str(w1), "zqx_w2": str(w2), "zqx_density": str(density),
                 "zqx_dare_drop": str(dare_drop), "zqx_seed": str(seed), "zqx_lora_1": os.path.basename(p1),
                 "zqx_lora_2": os.path.basename(p2), "zqx_format": "ComfyUI generic keys (diffusion_model.<weight>), alpha = rank"}
-        save_file(out_sd, fn, metadata=meta)
+        fn, rel = save_lora_file(res, f"{filename_prefix}_{mode}", save_dtype, meta)
         errs = [v.get("svd_rel_error") for v in info.values() if isinstance(v, dict) and "svd_rel_error" in v]
         head = [f"saved: {fn}", f"mode={mode} lam={lam} layers={len(res)} (lora_1 {len(f1)}, lora_2 {len(f2)})"]
         if via1 or via2:
             head.append(f"{len(via1) + len(via2)} modules mapped via normalised names (not loadable by ComfyUI's loader in their original naming).")
         if errs:
             head.append(f"ties_dense truncation: mean rel. Frobenius error {sum(errs) / len(errs):.4f}, max {max(errs):.4f}")
-        with open(fn[:-len(".safetensors")] + "_report.json", "w") as f:
-            json.dump({"mode": mode, "info": info, "conflicts": js}, f, indent=1, default=str)
-        rel = os.path.relpath(fn, folder_paths.get_folder_paths("loras")[0])
+        write_report(fn, {"mode": mode, "info": info, "conflicts": js})
         return {"ui": {"text": ["\n".join(head)]}, "result": (rel, "\n".join(head) + "\n\n" + txt)}
 
 
@@ -201,7 +227,7 @@ class ZQXLoRAConflictReport:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("report",)
     FUNCTION = "run"
-    CATEGORY = CATEGORY
+    CATEGORY = CAT_LORA
     OUTPUT_NODE = True
 
     def run(self, model, lora_1, lora_2, top_density, sign_stats):
@@ -214,3 +240,177 @@ class ZQXLoRAConflictReport:
         if un1 or un2:
             txt = f"WARNING: unmapped modules: {(un1 + un2)[:10]}\n" + txt
         return {"ui": {"text": [txt]}, "result": (txt,)}
+
+
+class ZQXLoRASurgery:
+    DESCRIPTION = ("Rewrite a single LoRA: per-block multipliers, drop module kinds (text stream, modulation, attention, "
+                   "mlp, io), rank truncation (max rank / energy), spectrum power, DARE on the up factor. Writes a new "
+                   "LoRA to models/loras/zqx/ + a JSON report.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL", {"tooltip": "Only used for the key map / weight shapes (nothing is patched)."}),
+            "lora_name": (_lora_list(),),
+            "strength": ("FLOAT", {"default": 1.0, "min": -4.0, "max": 4.0, "step": 0.01, "tooltip": "Baked-in global multiplier."}),
+            "block_weights": ("STRING", {"default": "", "tooltip": "e.g. '0-9:0, 10-29:1, other:1'. 0 removes the weight from the file."}),
+            "drop_kinds": ("STRING", {"default": "", "tooltip": "Comma list of module kinds to remove: text, modulation, attention, mlp, io, other."}),
+            "max_rank": ("INT", {"default": 0, "min": 0, "max": 1024, "tooltip": "Keep at most this many singular directions per weight (0 = all)."}),
+            "energy_keep": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1.0, "step": 0.01, "tooltip": "Keep the smallest rank holding this fraction of the squared singular values."}),
+            "spectrum_power": ("FLOAT", {"default": 1.0, "min": 0.05, "max": 4.0, "step": 0.05, "tooltip": "sigma_i -> sigma_1 (sigma_i/sigma_1)^p. <1 flattens, >1 sharpens."}),
+            "power_preserve": (["top", "frobenius"], {"default": "top"}),
+            "dare_drop": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.99, "step": 0.01, "tooltip": "DARE on the up factor (unbiased, stays low rank)."}),
+            "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+            "filename_prefix": ("STRING", {"default": "zqx_surgery"}),
+            "save_dtype": (SAVE_DTYPES, {"default": "float32"}),
+        }}
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("lora_file", "report")
+    FUNCTION = "run"
+    CATEGORY = CAT_LORA
+    OUTPUT_NODE = True
+
+    def run(self, model, lora_name, strength, block_weights, drop_kinds, max_rank, energy_keep, spectrum_power,
+            power_preserve, dare_drop, seed, filename_prefix, save_dtype):
+        from ..patches.lora_surgery import surgery
+        ad = get_adapter(model)
+        f, via, path = load_model_space(model, lora_name)
+        res, rep = surgery(ad, f, block_weights, drop_kinds, strength, max_rank, energy_keep, spectrum_power,
+                           power_preserve, dare_drop, seed)
+        meta = {"zqx_op": "surgery", "zqx_source": os.path.basename(path), "zqx_block_weights": block_weights,
+                "zqx_drop_kinds": drop_kinds, "zqx_strength": strength, "zqx_max_rank": max_rank,
+                "zqx_energy_keep": energy_keep, "zqx_spectrum_power": spectrum_power, "zqx_dare_drop": dare_drop,
+                "zqx_seed": seed}
+        fn, rel = save_lora_file(res, filename_prefix, save_dtype, meta)
+        write_report(fn, rep)
+        kinds = {}
+        for k, info in rep["layers"].items():
+            kinds.setdefault(info["kind"], [0, 0.0])
+            kinds[info["kind"]][0] += 1
+            kinds[info["kind"]][1] = max(kinds[info["kind"]][1], info["trunc_rel_error"])
+        lines = [f"saved: {fn}", f"weights kept {len(res)}, dropped {len(rep['dropped'])}"]
+        lines += [f"  {k}: {n} weights, max truncation error {e:.4f}" for k, (n, e) in sorted(kinds.items())]
+        if via:
+            lines.append(f"{len(via)} modules mapped via normalised names.")
+        txt = "\n".join(lines)
+        return {"ui": {"text": [txt]}, "result": (rel, txt)}
+
+
+class ZQXLoRACommonSubspace:
+    DESCRIPTION = ("Common subspace of 2-4 LoRAs (Iso-CTS-inspired, arXiv 2502.04959): per weight, the top-k left "
+                   "singular vectors of the summed deltas. 'common' writes the shared component (e.g. the 'AI look' "
+                   "shared by several character LoRAs made with the same pipeline); 'clean_target' removes that "
+                   "subspace from a target LoRA.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        none = ["None"] + _lora_list()
+        return {"required": {
+            "model": ("MODEL",),
+            "lora_1": (_lora_list(),),
+            "lora_2": (_lora_list(),),
+            "lora_3": (none, {"default": "None"}),
+            "lora_4": (none, {"default": "None"}),
+            "common_rank": ("INT", {"default": 4, "min": 1, "max": 256}),
+            "mode": (["common", "clean_target"], {"default": "common"}),
+            "target_lora": (none, {"default": "None", "tooltip": "Required for clean_target."}),
+            "lam": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+            "filename_prefix": ("STRING", {"default": "zqx_common"}),
+            "save_dtype": (SAVE_DTYPES, {"default": "float32"}),
+        }}
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("lora_file", "report")
+    FUNCTION = "run"
+    CATEGORY = CAT_LORA
+    OUTPUT_NODE = True
+
+    def run(self, model, lora_1, lora_2, lora_3, lora_4, common_rank, mode, target_lora, lam, filename_prefix, save_dtype):
+        from ..patches.lora_surgery import common_subspace_merge
+        names = [n for n in (lora_1, lora_2, lora_3, lora_4) if n != "None"]
+        loras = [load_model_space(model, n)[0] for n in names]
+        target = None
+        if mode == "clean_target":
+            if target_lora == "None":
+                raise ValueError("ZQX LoRA Common Subspace: clean_target needs target_lora")
+            target = load_model_space(model, target_lora)[0]
+        res, rep = common_subspace_merge(get_adapter(model), loras, common_rank, mode, target, lam)
+        fn, rel = save_lora_file(res, f"{filename_prefix}_{mode}", save_dtype,
+                                 {"zqx_op": "common_subspace", "zqx_mode": mode, "zqx_sources": ",".join(names),
+                                  "zqx_common_rank": common_rank, "zqx_target": target_lora, "zqx_lam": lam})
+        write_report(fn, rep)
+        lines = [f"saved: {fn}", f"shared weights: {rep['shared_weights']}"]
+        lines += [f"  {k}: {v:.3f} of its energy lies in the common subspace" for k, v in rep["mean_energy_in_common"].items()]
+        txt = "\n".join(lines)
+        return {"ui": {"text": [txt]}, "result": (rel, txt)}
+
+
+class ZQXSpatialLoRA:
+    DESCRIPTION = ("Token-masked LoRA (LoRAShop-style, arXiv 2505.23758): the LoRA runs as a side branch whose output "
+                   "is multiplied per token by a mask. E.g. realism LoRA on everything except the face (mask = face, "
+                   "invert on) and character LoRA only on the face. All weights 1 = identical to LoraLoader.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "lora_name": (_lora_list(),),
+            "strength_early": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "strength_late": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            "sigma_hi": sigma_input(1.0, "Upper edge of the strength ramp."),
+            "sigma_lo": sigma_input(0.0, "Lower edge of the strength ramp."),
+            "invert_mask": ("BOOLEAN", {"default": False, "tooltip": "Apply the LoRA where the mask is 0."}),
+            "text_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                                      "tooltip": "LoRA weight on text tokens (Qwen text stream, Z-Image caption tokens)."}),
+            "nonspatial_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                                            "tooltip": "LoRA weight on modulation / timestep layers (they act on the whole image)."}),
+            "other_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                                       "tooltip": "LoRA weight on Qwen-Image-Edit reference tokens and Z-Image padding tokens."}),
+            "allow_unmatched_keys": ("BOOLEAN", {"default": False}),
+        }, "optional": {"mask": ("MASK", {"tooltip": "Region of the generated image (resized to the token grid). None = everywhere."})}}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = CAT_LORA
+
+    def apply(self, model, lora_name, strength_early, strength_late, sigma_hi, sigma_lo, invert_mask, text_weight,
+              nonspatial_weight, other_weight, allow_unmatched_keys, mask=None):
+        from ..patches.spatial_lora import install
+        sd, _ = _load_lora_file(lora_name)
+        m, _, _ = install(model, sd, allow_unmatched_keys, strength_early=strength_early, strength_late=strength_late,
+                          sigma_hi=sigma_hi, sigma_lo=sigma_lo, mask=None if mask is None else mask.clone(),
+                          invert=invert_mask, text_weight=text_weight, nonspatial_weight=nonspatial_weight,
+                          other_weight=other_weight, key="zqx_spatial_lora_" + lora_name)
+        return (m,)
+
+
+class ZQXLoRAGuidance:
+    DESCRIPTION = ("LoRA guidance (LoRA-CFG, heuristic): out = out_base + w * (out_lora - out_base) with a sigma "
+                   "schedule for w. w=1 is the plain LoRA, w=0 the base model, w>1 amplifies the LoRA. E.g. character "
+                   "LoRA with w 0.3 in the layout steps and 1.5 in the detail steps. Two forwards per step when w != 0, 1.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "lora_name": (_lora_list(),),
+            "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01, "tooltip": "LoRA strength in the 'with LoRA' pass."}),
+            "w_early": ("FLOAT", {"default": 0.3, "min": -2.0, "max": 5.0, "step": 0.05, "tooltip": "w for sigma >= sigma_hi."}),
+            "w_late": ("FLOAT", {"default": 1.5, "min": -2.0, "max": 5.0, "step": 0.05, "tooltip": "w for sigma <= sigma_lo."}),
+            "sigma_hi": sigma_input(0.85, "Upper edge of the w ramp."),
+            "sigma_lo": sigma_input(0.6, "Lower edge of the w ramp."),
+            "allow_unmatched_keys": ("BOOLEAN", {"default": False}),
+        }}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = CAT_LORA
+
+    def apply(self, model, lora_name, strength, w_early, w_late, sigma_hi, sigma_lo, allow_unmatched_keys):
+        from ..patches.guidance import install_lora_guidance
+        sd, _ = _load_lora_file(lora_name)
+        pk, _ = load_lora_patches(model, sd, allow_unmatched=allow_unmatched_keys)
+        entries, _ = scheduled_entries(get_adapter(model), pk, strength, strength, 1.0, 0.0, "")
+        m, _, _ = install_lora_guidance(model, entries, "zqx_lora_guidance_" + lora_name, w_early, w_late, sigma_hi, sigma_lo)
+        return (m,)

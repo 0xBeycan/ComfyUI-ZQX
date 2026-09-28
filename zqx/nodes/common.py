@@ -1,4 +1,11 @@
-CATEGORY = "ZQX Experimental"
+CATEGORY_ROOT = "ZQX"
+CAT_ATTENTION = "ZQX/attention"
+CAT_LORA = "ZQX/lora"
+CAT_SAMPLING = "ZQX/sampling"
+CAT_GUIDANCE = "ZQX/guidance"
+CAT_SCORING = "ZQX/scoring"
+CAT_TOOLS = "ZQX/tools"
+CAT_EDIT = "ZQX/model-edit"
 
 
 def sigma_input(default, tooltip):

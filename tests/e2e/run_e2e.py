@@ -104,6 +104,68 @@ def run(url, g, expect):
     return ok, entry
 
 
+def new_nodes_graph(kind):
+    """Third prompt: every node added in 0.2.0 in one graph."""
+    cfg = 1.0 if kind == "zimage" else 2.5
+    g = {k: v for k, v in graph(kind).items() if k in ("1", "2", "3", "4", "5", "22", "23")}
+    g["23"] = dict(g["23"], inputs=dict(g["23"]["inputs"], model=["55", 0]))
+    char, real = f"zqx_e2e_char_{kind}.safetensors", f"zqx_e2e_real_{kind}.safetensors"
+    g.update({
+        "50": {"class_type": "ZQXSpatialLoRA", "inputs": {"model": ["1", 0], "lora_name": real, "strength_early": 1.0,
+                                                            "strength_late": 0.5, "sigma_hi": 1.0, "sigma_lo": 0.0,
+                                                            "invert_mask": True, "text_weight": 1.0, "nonspatial_weight": 0.0,
+                                                            "other_weight": 1.0, "allow_unmatched_keys": False,
+                                                            "mask": ["60", 0]}},
+        "51": {"class_type": "ZQXLoRAGuidance", "inputs": {"model": ["50", 0], "lora_name": char, "strength": 1.0,
+                                                             "w_early": 0.3, "w_late": 1.5, "sigma_hi": 0.8, "sigma_lo": 0.5,
+                                                             "allow_unmatched_keys": False}},
+        "52": {"class_type": "ZQXDiTPAG", "inputs": {"model": ["51", 0], "scale": 1.0, "sigma_start": 1.0, "sigma_end": 0.5,
+                                                       "blocks": "mid", "apply_to": "cond_only"}},
+        "53": {"class_type": "ZQXActivationSteering", "inputs": {"model": ["52", 0], "towards": ["2", 0], "away": ["3", 0],
+                                                                   "alpha": 0.3, "sigma_start": 1.0, "sigma_end": 0.6,
+                                                                   "blocks": "mid", "mode": "mean", "apply_to": "all"}},
+        "54": {"class_type": "ZQXUCETextEdit", "inputs": {"model": ["53", 0], "source": ["3", 0], "target": ["2", 0],
+                                                            "pairing": "mean", "lam": 0.1, "strength": 1.0}},
+        "55": {"class_type": "ZQXReferenceAttention", "inputs": {"model": ["54", 0], "reference": ["5", 0], "weight": 1.0,
+                                                                   "sigma_start": 0.95, "sigma_end": 0.2, "blocks": "all",
+                                                                   "position_mode": "matched", "capture_mode": "noised",
+                                                                   "cache_sigma": 0.0, "ref_sigma_mult": 1.0, "key_scale": 1.0,
+                                                                   "token_dropout": 0.0, "inject_uncond": True, "noise_seed": 0,
+                                                                   "match_threshold": 0.0, "match_mutual": True}},
+        "60": {"class_type": "SolidMask", "inputs": {"value": 1.0, "width": 64, "height": 64}},
+        "61": {"class_type": "ZQXTestFakeVAE", "inputs": {}},
+        "62": {"class_type": "ZQXScorerBackgroundSharpness", "inputs": {"weight": 1.0, "border": 0.2}},
+        "63": {"class_type": "ZQXScorerBackgroundSharpness", "inputs": {"weight": -0.5, "border": 0.3}},
+        "64": {"class_type": "ZQXScorerCombine", "inputs": {"scorer_1": ["62", 0], "scorer_2": ["63", 0]}},
+        "65": {"class_type": "RandomNoise", "inputs": {"noise_seed": 3}},
+        "66": {"class_type": "CFGGuider", "inputs": {"model": ["55", 0], "positive": ["2", 0], "negative": ["3", 0], "cfg": cfg}},
+        "67": {"class_type": "ZQXSeedSearch", "inputs": {"noise": ["65", 0], "guider": ["66", 0], "sampler": ["22", 0],
+                                                           "sigmas": ["23", 0], "latent_image": ["4", 0], "vae": ["61", 0],
+                                                           "scorer": ["64", 0], "n_candidates": 4, "probe_steps": 1, "keep": 2}},
+        "68": {"class_type": "ZQXTestLatentStats", "inputs": {"latent": ["67", 0], "tag": f"{kind} seed search"}},
+        "70": {"class_type": "ZQXLoRASurgery", "inputs": {"model": ["1", 0], "lora_name": char, "strength": 1.0,
+                                                            "block_weights": "0:0.5", "drop_kinds": "io", "max_rank": 2,
+                                                            "energy_keep": 1.0, "spectrum_power": 0.8, "power_preserve": "top",
+                                                            "dare_drop": 0.0, "seed": 0, "filename_prefix": f"e2e_{kind}_surg",
+                                                            "save_dtype": "float32"}},
+        "71": {"class_type": "ZQXLoRACommonSubspace", "inputs": {"model": ["1", 0], "lora_1": char, "lora_2": real,
+                                                                   "lora_3": "None", "lora_4": "None", "common_rank": 2,
+                                                                   "mode": "clean_target", "target_lora": char, "lam": 1.0,
+                                                                   "filename_prefix": f"e2e_{kind}_common", "save_dtype": "float32"}},
+        "72": {"class_type": "ZQXTestFakeClipVision", "inputs": {}},
+        "73": {"class_type": "ZQXRealismLoRAAblation", "inputs": {
+            "model": ["1", 0], "realism_lora": real, "realism_strength": 1.0, "positive": ["2", 0], "negative": ["3", 0],
+            "latent_image": ["4", 0], "vae": ["61", 0], "identity_scorer": ["62", 0], "clip_vision": ["72", 0],
+            "seeds": "1, 2", "steps": 2, "cfg": cfg, "sampler_name": "euler", "scheduler": "simple", "units": "blocks+svd",
+            "svd_blocks": 1, "svd_components": 1, "min_identity_gain": 0.0, "max_realism_drop": 1.0,
+            "filename_prefix": f"e2e_{kind}_ablation", "save_dtype": "float32"}},
+        "74": {"class_type": "ZQXPoseBank", "inputs": {"bank_folder": "zqx_e2e_pose_bank", "tags": "", "width": 64,
+                                                         "height": 96, "aspect_tolerance": 0.2, "resize": "crop_to_size", "seed": 1}},
+        "75": {"class_type": "PreviewImage", "inputs": {"images": ["74", 0]}},
+    })
+    return g
+
+
 def post(url, path, data):
     req = urllib.request.Request(url + path, data=json.dumps(data).encode(), headers={"Content-Type": "application/json"})
     return json.loads(urllib.request.urlopen(req).read())
@@ -119,6 +181,9 @@ def main(url):
         rel = "zqx/" + saved.split("/zqx/")[1]
         print("==", kind, "reload merged LoRA", rel)
         o, _ = run(url, reload_graph(kind, rel), ["45"])
+        ok &= o
+        print("==", kind, "new nodes graph")
+        o, _ = run(url, new_nodes_graph(kind), ["67", "68", "70", "71", "73", "75"])
         ok &= o
     print("E2E", "PASSED" if ok else "FAILED")
     return ok

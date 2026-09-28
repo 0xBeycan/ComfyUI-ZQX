@@ -7,7 +7,8 @@ import os
 import sys
 import urllib.request
 
-FILE_INPUTS = {"unet_name", "clip_name", "vae_name", "lora_name", "lora_1", "lora_2", "character_lora", "realism_lora", "image"}
+FILE_INPUTS = {"unet_name", "clip_name", "vae_name", "lora_name", "lora_1", "lora_2", "lora_3", "lora_4", "target_lora",
+               "character_lora", "realism_lora", "image", "name"}
 
 
 def main(url):

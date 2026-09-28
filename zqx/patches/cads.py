@@ -5,6 +5,7 @@ import torch
 
 from ..core.cads import cads_apply, cads_gamma
 from ..core.schedule import sigma_from_transformer_options
+from . import passes
 
 APPLY_TO = ["cond_and_uncond", "cond_only"]
 
@@ -37,10 +38,10 @@ class CADSPatch:
         sigma = sigma_from_transformer_options(to)
         gamma = cads_gamma(sigma, self.tau1, self.tau2)
         if self.s == 0.0 or gamma == 1.0:
-            return executor(*args, **kwargs)
+            return passes.call(executor, args, kwargs)
         ctx = ad.get_context(args, kwargs)
         if ctx is None:
-            return executor(*args, **kwargs)
+            return passes.call(executor, args, kwargs)
         b = ctx.shape[0]
         rows = torch.ones(b, dtype=torch.bool)
         if self.apply_to == "cond_only":
@@ -52,14 +53,14 @@ class CADSPatch:
                 if c == 1:
                     rows[i * per:(i + 1) * per] = False
             if not bool(rows.any()):
-                return executor(*args, **kwargs)
+                return passes.call(executor, args, kwargs)
         noise = self._noise(ctx.shape, sigma, ctx.device)
         new = cads_apply(ctx, gamma, self.s, self.psi, noise, relative_noise=self.relative)
         rows = rows.to(ctx.device).view(b, *([1] * (ctx.ndim - 1)))
         new = torch.where(rows, new, ctx)
         args, kwargs = ad.replace_args(args, kwargs, context=new)
         self.calls_patched += 1
-        return executor(*args, **kwargs)
+        return passes.call(executor, args, kwargs)
 
 
 def install(model_patcher, **kw):

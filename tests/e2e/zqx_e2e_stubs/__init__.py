@@ -9,6 +9,31 @@ import torch
 _here = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(_here)))   # tests/
 import tiny_models as tm  # noqa: E402
+import fakes  # noqa: E402
+
+
+class ZQXTestFakeVAE:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+    RETURN_TYPES = ("VAE",)
+    FUNCTION = "run"
+    CATEGORY = "ZQX test stubs"
+
+    def run(self):
+        return (fakes.FakeVAE(),)
+
+
+class ZQXTestFakeClipVision:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+    RETURN_TYPES = ("CLIP_VISION",)
+    FUNCTION = "run"
+    CATEGORY = "ZQX test stubs"
+
+    def run(self):
+        return (fakes.FakeClipVision(),)
 
 
 class ZQXTestTinyModel:
@@ -64,5 +89,6 @@ class ZQXTestLatentStats:
         return {"ui": {"text": [txt]}}
 
 
-NODE_CLASS_MAPPINGS = {"ZQXTestTinyModel": ZQXTestTinyModel, "ZQXTestRandomCond": ZQXTestRandomCond,
+NODE_CLASS_MAPPINGS = {"ZQXTestFakeVAE": ZQXTestFakeVAE, "ZQXTestFakeClipVision": ZQXTestFakeClipVision,
+                       "ZQXTestTinyModel": ZQXTestTinyModel, "ZQXTestRandomCond": ZQXTestRandomCond,
                        "ZQXTestLatent": ZQXTestLatent, "ZQXTestLatentStats": ZQXTestLatentStats}

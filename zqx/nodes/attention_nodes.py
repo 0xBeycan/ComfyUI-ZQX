@@ -1,5 +1,5 @@
 from ..patches.reference_attention import CAPTURE_MODES, POSITION_MODES, RefAttnConfig, install
-from .common import CATEGORY, sigma_input
+from .common import CAT_ATTENTION, sigma_input
 
 
 class ZQXReferenceAttention:
@@ -20,7 +20,7 @@ class ZQXReferenceAttention:
                 "sigma_end": sigma_input(0.0, "Low-noise edge of the window (active while sigma >= sigma_end)."),
                 "blocks": ("STRING", {"default": "all", "tooltip": "Main blocks to inject into, e.g. 'all' or '0-19, 30-45'."}),
                 "position_mode": (POSITION_MODES, {"default": "frame",
-                                                   "tooltip": "RoPE placement of the reference: 'frame' = next frame index (like QIE refs), 'right'/'below' = next to the canvas, 'same' = overlapping positions."}),
+                                                   "tooltip": "RoPE placement of the reference: 'frame' = next frame index (like QIE refs), 'right'/'below' = next to the canvas, 'same' = overlapping positions, 'matched' = each reference token moved to the position of its most similar target token (FreeGraftor / CharaConsist style; follows the generated pose)."}),
                 "capture_mode": (CAPTURE_MODES, {"default": "noised",
                                                  "tooltip": "'noised': reference noised to the current sigma each step (extra forward every step). 'cached': captured once at cache_sigma."}),
                 "cache_sigma": sigma_input(0.0, "Noise level of the reference in 'cached' mode (0 = clean)."),
@@ -35,6 +35,9 @@ class ZQXReferenceAttention:
                 "noise_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             },
             "optional": {
+                "match_threshold": ("FLOAT", {"default": 0.5, "min": -1.0, "max": 1.0, "step": 0.01,
+                                              "tooltip": "'matched' mode: minimum cosine similarity (value vectors) for a reference token to be placed at a target token's position."}),
+                "match_mutual": ("BOOLEAN", {"default": True, "tooltip": "'matched' mode: keep only mutual nearest neighbours."}),
                 "query_mask": ("MASK", {"tooltip": "Where in the generated image the reference may be attended to (e.g. face region). Resized to the token grid."}),
                 "key_mask": ("MASK", {"tooltip": "Which part of the reference is visible (e.g. only the reference face)."}),
             },
@@ -42,10 +45,11 @@ class ZQXReferenceAttention:
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "apply"
-    CATEGORY = CATEGORY
+    CATEGORY = CAT_ATTENTION
 
     def apply(self, model, reference, weight, sigma_start, sigma_end, blocks, position_mode, capture_mode, cache_sigma,
-              ref_sigma_mult, key_scale, token_dropout, inject_uncond, noise_seed, query_mask=None, key_mask=None):
+              ref_sigma_mult, key_scale, token_dropout, inject_uncond, noise_seed, match_threshold=0.5, match_mutual=True,
+              query_mask=None, key_mask=None):
         ref = reference["samples"]
         if ref.shape[0] != 1:
             raise ValueError("ZQX Reference Attention: reference latent must have batch size 1")
@@ -53,6 +57,7 @@ class ZQXReferenceAttention:
                             blocks=blocks, position_mode=position_mode, capture_mode=capture_mode,
                             cache_sigma=cache_sigma, noise_seed=noise_seed, inject_uncond=inject_uncond,
                             ref_sigma_mult=ref_sigma_mult, key_scale=key_scale, token_dropout=token_dropout,
+                            match_threshold=match_threshold, match_mutual=match_mutual,
                             query_mask=None if query_mask is None else query_mask.clone(),
                             key_mask=None if key_mask is None else key_mask.clone())
         m, _ = install(model, cfg)

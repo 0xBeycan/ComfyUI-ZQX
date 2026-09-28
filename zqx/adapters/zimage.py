@@ -33,6 +33,21 @@ class ZImageAdapter(ModelAdapter):
     import re as _re
     block_key_re = _re.compile(r"(?:^|\.)layers\.(\d+)\.")
     group_rules = [(r"(?:^|\.)(noise_refiner|context_refiner|siglip_refiner)\.", "refiner")]
+    # (RMSNorm module path, Linear weight key) of the text input projection (UCE edits this layer)
+    text_input_projection = ("diffusion_model.cap_embedder.0", "diffusion_model.cap_embedder.1.weight")
+    stream_rules = [
+        (r"adaLN_modulation|(^|\.)t_embedder\.|(^|\.)time_text_embed\.|clip_text_pooled_proj", "nonspatial"),
+        (r"(^|\.)(context_refiner|cap_embedder)\.", "text"),
+        (r"(^|\.)(x_embedder|noise_refiner)\.", "image"),
+        (r"(^|\.)layers\.\d+\.|(^|\.)final_layer\.linear\.", "joint"),
+    ]
+    module_kind_rules = [
+        (r"(^|\.)(context_refiner|cap_embedder)\.", "text"),
+        (r"(adaLN_modulation|(^|\.)t_embedder\.|(^|\.)time_text_embed\.|clip_text_pooled_proj)", "modulation"),
+        (r"\.attention\.(qkv|out)\.", "attention"),
+        (r"\.feed_forward\.", "mlp"),
+        (r"(^|\.)(x_embedder|final_layer)\.", "io"),
+    ]
 
     @classmethod
     def matches(cls, dm) -> bool:
@@ -102,3 +117,7 @@ class ZImageAdapter(ModelAdapter):
         ids[..., 1] = torch.arange(h_tok, dtype=torch.float32)[:, None]
         ids[..., 2] = torch.arange(w_tok, dtype=torch.float32)[None, :]
         return ids.reshape(-1, 3)
+
+    def image_ids_for_span(self, x: torch.Tensor, s0: int, transformer_options=None) -> torch.Tensor:
+        """Z-Image image ids use t = cap_len + 1, where cap_len (padded caption length) = start of the image span."""
+        return self.image_position_ids(x, n_txt=s0, transformer_options=transformer_options)

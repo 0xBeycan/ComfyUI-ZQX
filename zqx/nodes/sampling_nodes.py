@@ -1,4 +1,4 @@
-from .common import CATEGORY, sigma_input
+from .common import CAT_GUIDANCE, CAT_SAMPLING, CAT_TOOLS, sigma_input
 
 
 class ZQXCADS:
@@ -23,7 +23,7 @@ class ZQXCADS:
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "apply"
-    CATEGORY = CATEGORY
+    CATEGORY = CAT_GUIDANCE
 
     def apply(self, model, tau1, tau2, noise_scale, psi, relative_noise, apply_to, seed):
         from ..patches.cads import install
@@ -50,7 +50,7 @@ class ZQXLowFreqNoise:
 
     RETURN_TYPES = ("NOISE",)
     FUNCTION = "get"
-    CATEGORY = CATEGORY
+    CATEGORY = CAT_SAMPLING
 
     def get(self, noise_seed, reference, strength, cutoff, filter, butterworth_order, base_noise=None):
         from ..patches.noise import LowFreqNoise
@@ -77,7 +77,7 @@ class ZQXSigmaSplitGuider:
 
     RETURN_TYPES = ("GUIDER",)
     FUNCTION = "get"
-    CATEGORY = CATEGORY
+    CATEGORY = CAT_GUIDANCE
 
     def get(self, model, positive, negative, switch_sigma, cfg_early, cfg_late, model_early=None):
         from ..patches.guider import SigmaSplitGuider
@@ -95,7 +95,7 @@ class ZQXSigmasToText:
 
     RETURN_TYPES = ("STRING",)
     FUNCTION = "run"
-    CATEGORY = CATEGORY
+    CATEGORY = CAT_TOOLS
     OUTPUT_NODE = True
 
     def run(self, sigmas):
@@ -121,7 +121,7 @@ class ZQXBlockSpec:
     RETURN_TYPES = ("STRING", "STRING")
     RETURN_NAMES = ("block_list", "block_weights")
     FUNCTION = "run"
-    CATEGORY = CATEGORY
+    CATEGORY = CAT_TOOLS
 
     def run(self, index, width, total_blocks, mode, weight):
         a = index
@@ -141,3 +141,30 @@ class ZQXBlockSpec:
             block_list = ", ".join(parts) if parts else ""
             block_weights = f"{sel}:{weight}"
         return (block_list, block_weights)
+
+
+class ZQXDiTPAG:
+    DESCRIPTION = ("Perturbed-attention guidance for Qwen-Image and Z-Image (PAG, arXiv 2403.17377): an extra forward "
+                   "in which the selected blocks use an identity attention map for image queries; "
+                   "out += scale * (out - out_perturbed). Works at CFG 1 (unlike CFG tweaks). Core PAG is UNet-only.")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "scale": ("FLOAT", {"default": 1.5, "min": 0.0, "max": 10.0, "step": 0.05,
+                                "tooltip": "Applied to the cond rows before CFG: with CFG > 1 the effective PAG scale is scale * cfg."}),
+            "sigma_start": sigma_input(1.0, "Active while sigma <= sigma_start."),
+            "sigma_end": sigma_input(0.0, "Active while sigma >= sigma_end."),
+            "blocks": ("STRING", {"default": "mid", "tooltip": "'mid' = the middle block, or a list like '10-14'."}),
+            "apply_to": (["cond_only", "all"], {"default": "cond_only"}),
+        }}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = CAT_GUIDANCE
+
+    def apply(self, model, scale, sigma_start, sigma_end, blocks, apply_to):
+        from ..patches.guidance import install_pag
+        m, _ = install_pag(model, scale=scale, sigma_start=sigma_start, sigma_end=sigma_end, blocks=blocks, apply_to=apply_to)
+        return (m,)

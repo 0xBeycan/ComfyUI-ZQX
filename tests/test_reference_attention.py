@@ -85,9 +85,11 @@ def test_override_matches_naive_formula(with_mask):
     if with_mask:  # Qwen-style additive text padding mask (B, 1, N)
         mask = torch.zeros(b, 1, n)
         mask[1, 0, 1] = -1e4
+    from zqx.patches import passes
     for func in (attention_pytorch, attention_basic):
-        out = patch.attention_override(func, q, k, v, h, mask, skip_reshape=True, skip_output_reshape=True,
-                                       transformer_options={"block_index": 0}, _inside_attn_wrapper=True)
+        with passes.entry("enter", patch):
+            out = patch.attention_override(func, q, k, v, h, mask, skip_reshape=True, skip_output_reshape=True,
+                                           transformer_options={"block_index": 0}, _inside_attn_wrapper=True)
         # naive oracle
         kr_rot = apply_rotation(kr, rot)
         full_q = torch.zeros(b, n)
@@ -381,3 +383,58 @@ def test_zimage_fused_rope_kernel_matches_rotation_composition():
     moved = apply_rotation(keys["base"], rot)
     assert torch.allclose(moved, keys["shift"], atol=5e-5), (moved - keys["shift"]).abs().max()
     assert not torch.allclose(keys["base"], keys["shift"], atol=1e-3)
+
+
+@pytest.mark.parametrize("kind", ["qwen", "zimage"])
+def test_matched_positions(kind):
+    """'matched' mode: with the reference input equal to the target input every reference token matches itself
+    (identical value vectors) -> zero offset -> identical to 'same'.  With an impossible threshold nothing matches
+    -> identical (up to float) to the unpatched model."""
+    import tiny_models as tm
+    p = tm.qwen_image(num_layers=2) if kind == "qwen" else tm.z_image(num_layers=2)
+    ctx = (tm.qwen_cond if kind == "qwen" else tm.zimage_cond)(1, n_txt=7)[0][0]
+    ref = (tm.qwen_latent if kind == "qwen" else tm.zimage_latent)(10, 12, seed=5)
+    sigma = 0.7
+    ms, ps = _install(p, ref, weight=1.0, position_mode="same", sigma_start=1.0, sigma_end=0.0)
+    x = ps._ref_input(torch.zeros_like(ref), sigma)
+    same = tm.direct_call(ms, x, sigma, ctx)
+    mm, pm = _install(p, ref, weight=1.0, position_mode="matched", match_threshold=-1.0, match_mutual=True)
+    matched = tm.direct_call(mm, x, sigma, ctx)
+    # block 0 sees identical target/reference values; in block 1 the target already carries the injection,
+    # so only check block 0 matched perfectly and the overall result is close to 'same'
+    assert pm.last_match_frac[0] == 1.0
+    assert torch.allclose(matched, same, atol=5e-3), (matched - same).abs().max()
+    mn, pn = _install(p, ref, weight=1.0, position_mode="matched", match_threshold=1.5)
+    none = tm.direct_call(mn, x, sigma, ctx)
+    plain = tm.direct_call(p, x, sigma, ctx)
+    assert pn.last_match_frac == [0.0, 0.0]
+    assert torch.allclose(none, plain, atol=1e-5)
+
+
+def test_matched_positions_move_keys_to_target_positions():
+    """Reference = target shifted by one token column: every matched reference key must be rotated by exactly
+    the (h, w) displacement between the two positions."""
+    import tiny_models as tm
+    from zqx.adapters import get_adapter
+    from zqx.patches.reference_attention import RefAttnConfig, ReferenceAttentionPatch, _CallState
+    from zqx.core.rope import apply_rotation
+    from comfy.ldm.flux.math import apply_rope1
+    p = tm.qwen_image(1)
+    ad = get_adapter(p)
+    patch = ReferenceAttentionPatch(ad, RefAttnConfig(ref_latent=torch.zeros(1, 16, 1, 8, 8), position_mode="matched",
+                                                      match_threshold=0.9, match_mutual=True))
+    x = torch.zeros(1, 16, 1, 8, 8)          # 4x4 tokens
+    g = torch.Generator().manual_seed(0)
+    h, d = 2, 32
+    v_t = torch.randn(1, h, 16, d, generator=g)
+    # reference tokens = target tokens rolled by one column (w -> w-1), with the reference's own keys
+    idx = torch.arange(16).view(4, 4).roll(-1, dims=1).flatten()
+    v_r = v_t[:, :, idx]
+    k_pre = torch.randn(1, h, 16, d, generator=g)
+    ids = ad.image_position_ids(x)
+    k_r = apply_rope1(k_pre, ad.rope_freqs(ids))            # reference keys at their own positions
+    st = _CallState(mode="inject", blocks=None, ref_s0=0, ref_x=x, tgt_x=x, to={})
+    kr2, keep = patch._match_and_rotate(k_r, v_r, v_t, 0, st)
+    assert keep.all()
+    expected = apply_rope1(k_pre, ad.rope_freqs(ids[idx]))  # reference token j now sits at target position idx[j]
+    assert torch.allclose(kr2, expected, atol=5e-5)

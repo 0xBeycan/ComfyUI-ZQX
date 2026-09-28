@@ -1,29 +1,46 @@
 from .attention_nodes import ZQXReferenceAttention
-from .lora_nodes import ZQXKLoRA, ZQXLoRAArithmetic, ZQXLoRAConflictReport, ZQXScheduledLoRA
-from .sampling_nodes import ZQXBlockSpec, ZQXCADS, ZQXLowFreqNoise, ZQXSigmaSplitGuider, ZQXSigmasToText
+from .edit_nodes import ZQXActivationSteering, ZQXUCETextEdit
+from .lora_nodes import (ZQXKLoRA, ZQXLoRAArithmetic, ZQXLoRACommonSubspace, ZQXLoRAConflictReport, ZQXLoRAGuidance,
+                         ZQXLoRASurgery, ZQXScheduledLoRA, ZQXSpatialLoRA)
+from .sampling_nodes import (ZQXBlockSpec, ZQXCADS, ZQXDiTPAG, ZQXLowFreqNoise, ZQXSigmaSplitGuider,
+                             ZQXSigmasToText)
+from .scoring_nodes import (ZQXRealismLoRAAblation, ZQXScorerBackgroundSharpness, ZQXScorerClipSimilarity,
+                            ZQXScorerCombine, ZQXScorerFace, ZQXSeedSearch)
+from .tool_nodes import ZQXPoseBank
 
-NODE_CLASS_MAPPINGS = {
-    "ZQXReferenceAttention": ZQXReferenceAttention,
-    "ZQXScheduledLoRA": ZQXScheduledLoRA,
-    "ZQXKLoRA": ZQXKLoRA,
-    "ZQXLoRAArithmetic": ZQXLoRAArithmetic,
-    "ZQXLoRAConflictReport": ZQXLoRAConflictReport,
-    "ZQXCADS": ZQXCADS,
-    "ZQXLowFreqNoise": ZQXLowFreqNoise,
-    "ZQXSigmaSplitGuider": ZQXSigmaSplitGuider,
-    "ZQXSigmasToText": ZQXSigmasToText,
-    "ZQXBlockSpec": ZQXBlockSpec,
-}
+_NODES = [
+    # attention / identity
+    (ZQXReferenceAttention, "ZQX Reference Attention (identity)"),
+    # LoRA
+    (ZQXScheduledLoRA, "ZQX Scheduled LoRA (sigma / block)"),
+    (ZQXSpatialLoRA, "ZQX Spatial LoRA (masked)"),
+    (ZQXLoRAGuidance, "ZQX LoRA Guidance (LoRA-CFG)"),
+    (ZQXKLoRA, "ZQX K-LoRA (character + realism)"),
+    (ZQXLoRAArithmetic, "ZQX LoRA Arithmetic"),
+    (ZQXLoRASurgery, "ZQX LoRA Surgery"),
+    (ZQXLoRACommonSubspace, "ZQX LoRA Common Subspace"),
+    (ZQXLoRAConflictReport, "ZQX LoRA Conflict Report"),
+    (ZQXRealismLoRAAblation, "ZQX Realism LoRA Ablation (identity-safe)"),
+    # guidance / conditioning
+    (ZQXCADS, "ZQX CADS (condition annealing)"),
+    (ZQXSigmaSplitGuider, "ZQX Sigma Split Guider"),
+    (ZQXDiTPAG, "ZQX Perturbed Attention Guidance (DiT)"),
+    (ZQXActivationSteering, "ZQX Activation Steering"),
+    # model edit
+    (ZQXUCETextEdit, "ZQX UCE Text Edit"),
+    # sampling
+    (ZQXLowFreqNoise, "ZQX Low-Frequency Noise"),
+    (ZQXSeedSearch, "ZQX Seed Search (first-step scoring)"),
+    # scoring
+    (ZQXScorerFace, "ZQX Scorer: Face (InsightFace)"),
+    (ZQXScorerClipSimilarity, "ZQX Scorer: CLIP Similarity"),
+    (ZQXScorerBackgroundSharpness, "ZQX Scorer: Background Sharpness"),
+    (ZQXScorerCombine, "ZQX Scorer: Combine"),
+    # tools
+    (ZQXPoseBank, "ZQX Pose Bank"),
+    (ZQXSigmasToText, "ZQX Sigmas To Text"),
+    (ZQXBlockSpec, "ZQX Block Spec (ablation)"),
+]
 
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "ZQXReferenceAttention": "ZQX Reference Attention (identity)",
-    "ZQXScheduledLoRA": "ZQX Scheduled LoRA (sigma / block)",
-    "ZQXKLoRA": "ZQX K-LoRA (character + realism)",
-    "ZQXLoRAArithmetic": "ZQX LoRA Arithmetic",
-    "ZQXLoRAConflictReport": "ZQX LoRA Conflict Report",
-    "ZQXCADS": "ZQX CADS (condition annealing)",
-    "ZQXLowFreqNoise": "ZQX Low-Frequency Noise",
-    "ZQXSigmaSplitGuider": "ZQX Sigma Split Guider",
-    "ZQXSigmasToText": "ZQX Sigmas To Text",
-    "ZQXBlockSpec": "ZQX Block Spec (ablation)",
-}
+NODE_CLASS_MAPPINGS = {cls.__name__: cls for cls, _ in _NODES}
+NODE_DISPLAY_NAME_MAPPINGS = {cls.__name__: name for cls, name in _NODES}

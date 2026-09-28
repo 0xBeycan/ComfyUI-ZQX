@@ -14,3 +14,11 @@ for kind in ("zimage", "qwen"):
               os.path.join(out, f"zqx_e2e_char_{kind}.safetensors"))
     save_file(lu.make_lora(kind, seed=2, rank=3, fmt="peft"), os.path.join(out, f"zqx_e2e_real_{kind}.safetensors"))
 print("ok", out)
+
+# a tiny pose bank for ZQXPoseBank
+from PIL import Image  # noqa: E402
+bank = os.path.join(sys.argv[1], "input", "zqx_e2e_pose_bank", "walking")
+os.makedirs(bank, exist_ok=True)
+for i, (w, h) in enumerate([(64, 96), (60, 100)]):
+    Image.new("RGB", (w, h), (40 * i, 120, 200)).save(os.path.join(bank, f"pose_{i}.png"))
+print("ok", bank)

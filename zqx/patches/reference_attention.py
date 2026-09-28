@@ -40,8 +40,9 @@ from ..adapters import AdapterError, ModelAdapter, QwenImageAdapter, ZImageAdapt
 from ..core.attention import build_extended_mask, reference_log_bias
 from ..core.rope import apply_rotation
 from ..core.schedule import in_sigma_window, parse_block_list, sigma_from_transformer_options
+from . import passes
 
-POSITION_MODES = ["frame", "right", "below", "same"]
+POSITION_MODES = ["frame", "right", "below", "same", "matched"]
 CAPTURE_MODES = ["noised", "cached"]
 
 
@@ -60,6 +61,8 @@ class RefAttnConfig:
     ref_sigma_mult: float = 1.0                # noised mode: reference noise level = mult * sigma (FreeCus: < 1)
     key_scale: float = 1.0                     # multiply reference keys (FreeCus uses 1.1): sharper/softer ref attention
     token_dropout: float = 0.0                 # ConsiStory-style: drop this fraction of reference tokens each step
+    match_threshold: float = 0.5               # 'matched' mode: minimum cosine similarity of value vectors
+    match_mutual: bool = True                  # 'matched' mode: keep only mutual nearest neighbours
     query_mask: Optional[torch.Tensor] = None  # (H, W) in [0, 1], any resolution (resized to the token grid)
     key_mask: Optional[torch.Tensor] = None    # (H, W) in [0, 1] over the reference image
 
@@ -75,6 +78,11 @@ class _CallState:
     qmask_img: Optional[torch.Tensor] = None   # (B, n_img) in [0,1]
     kmask: Optional[torch.Tensor] = None       # (1, n_ref) in [0,1]
     trace: List[Tuple[str, int]] = field(default_factory=list)
+    ref_s0: Optional[int] = None               # start of the reference image span in the capture pass
+    ref_x: Optional[torch.Tensor] = None       # reference model input (for its RoPE ids in 'matched' mode)
+    tgt_x: Optional[torch.Tensor] = None
+    to: Optional[dict] = None
+    match_frac: List[float] = field(default_factory=list)
 
 
 def resize_mask_to_tokens(mask: torch.Tensor, h_tok: int, w_tok: int) -> torch.Tensor:
@@ -196,6 +204,8 @@ class ReferenceAttentionPatch:
         ad = self.adapter
         if mode == "same":
             return (0.0, 0.0, 0.0)
+        if mode == "matched":
+            return None
         if isinstance(ad, QwenImageAdapter):
             refs = ad.get_ref_latents(args, kwargs)
             n_native = len(refs) if refs is not None else 0
@@ -239,13 +249,19 @@ class ReferenceAttentionPatch:
 
     # ------------------------------------------------------------------ wrapper
     def diffusion_model_wrapper(self, executor, *args, **kwargs):
+        if passes.in_foreign_pass():
+            return passes.call(executor, args, kwargs)
+        with passes.entry("enter", self, args, kwargs):
+            return self._wrapper(executor, *args, **kwargs)
+
+    def _wrapper(self, executor, *args, **kwargs):
         ad = self.adapter
         to = ad.get_transformer_options(args, kwargs)
         to.pop("block_index", None)
         sigma = sigma_from_transformer_options(to)
         cfg = self.cfg
         if cfg.weight == 0.0 or not in_sigma_window(sigma, cfg.sigma_start, cfg.sigma_end):
-            return executor(*args, **kwargs)
+            return passes.call(executor, args, kwargs)
         x = ad.get_x(args, kwargs)
         batch = x.shape[0]
         layout = ad.layout(x, args, kwargs)
@@ -254,7 +270,7 @@ class ReferenceAttentionPatch:
         if cfg.query_mask is not None:
             qimg = qimg * resize_mask_to_tokens(cfg.query_mask, layout.h_tok, layout.w_tok).to(x.device)[None]
         if not bool(torch.any(qimg > 0)):
-            return executor(*args, **kwargs)
+            return passes.call(executor, args, kwargs)
 
         if cfg.capture_mode == "noised":
             ref_sigma = sigma * cfg.ref_sigma_mult
@@ -272,48 +288,53 @@ class ReferenceAttentionPatch:
         if cfg.key_mask is not None:
             kmask = resize_mask_to_tokens(cfg.key_mask, ref_layout.h_tok, ref_layout.w_tok).to(x.device)[None]
             if not bool(torch.any(kmask > 0)):
-                return executor(*args, **kwargs)
+                return passes.call(executor, args, kwargs)
         if cfg.token_dropout > 0:
             # deterministic per (seed, sigma): same drop pattern for every block of this step
             g = torch.Generator(device="cpu").manual_seed(int(cfg.noise_seed) * 1000003 + int(round(sigma * 1e6)))
             keep = (torch.rand((1, ref_layout.n_img), generator=g) >= cfg.token_dropout).to(kmask)
             kmask = kmask * keep.to(kmask.device)
             if not bool(torch.any(kmask > 0)):
-                return executor(*args, **kwargs)
+                return passes.call(executor, args, kwargs)
 
         delta = self._position_delta(x, ref_in, args, kwargs, to)
-        rot = ad.rotation_for_offset(delta, x.device)
+        rot = None if delta is None else ad.rotation_for_offset(delta, x.device)
 
         # ---- capture pass
         store = None
+        ref_s0 = None
         cache_key = None
         if cfg.capture_mode == "cached":
             ctx_args = [a for i, a in enumerate(args) if i not in (0, 1) and a is not to]
             cache_key = _fingerprint((batch, tuple(ref_in.shape), cfg.cache_sigma, ctx_args, kwargs))
-            store = self._cache.get(cache_key, None)
+            cached = self._cache.get(cache_key, None)
+            if cached is not None:
+                store, ref_s0 = cached
         if store is None:
             st = _CallState(mode="capture", blocks=self.block_list, ref_layout=ref_layout)
             self.state = st
             try:
                 cargs, ckwargs = ad.replace_args(args, kwargs, x=ref_in, timestep=ref_t)
                 to.pop("block_index", None)
-                executor(*cargs, **ckwargs)
+                with passes.entry("foreign", self, cargs, ckwargs):
+                    passes.call(executor, cargs, ckwargs)
             finally:
                 self.state = None
             store = st.store
+            ref_s0 = st.ref_s0
             capture_trace = [b for m, b in st.trace]
             if cache_key is not None:
-                self._cache[cache_key] = store
+                self._cache[cache_key] = (store, ref_s0)
         else:
             capture_trace = None
 
         # ---- inject pass
         st = _CallState(mode="inject", blocks=self.block_list, layout=layout, rot=rot, store=store,
-                        qmask_img=qimg, kmask=kmask)
+                        qmask_img=qimg, kmask=kmask, ref_s0=ref_s0, ref_x=ref_in, tgt_x=x, to=to)
         self.state = st
         try:
             to.pop("block_index", None)
-            out = executor(*args, **kwargs)
+            out = passes.call(executor, args, kwargs)
         finally:
             self.state = None
         inject_trace = [b for m, b in st.trace]
@@ -322,9 +343,38 @@ class ReferenceAttentionPatch:
         if capture_trace is None and sorted(store.keys()) != sorted(set(inject_trace)):
             raise AdapterError("ZQX: cached reference does not cover the injected blocks")
         self._last_store = store
+        self.last_match_frac = list(st.match_frac)
         self.last_trace = [("capture", b) for b in (capture_trace or [])] + [("inject", b) for b in inject_trace]
         self.calls_patched += 1
         return out
+
+    # ------------------------------------------------------------------ matched positions
+    def _match_and_rotate(self, kr, vr, v_tgt, s0, st):
+        """FreeGraftor / CharaConsist-style placement: each reference token is matched to the target image token
+        with the most similar value vector (cosine over all heads; V carries no RoPE).  Matched reference keys are
+        rotated from their own position p_r to the matched target position p_t by R(p_t - p_r); unmatched tokens
+        (similarity < threshold, or not mutual nearest neighbours) are masked out."""
+        ad = self.adapter
+        b, h, nr, d = kr.shape
+        n_img = v_tgt.shape[2]
+        fr = torch.nn.functional.normalize(vr.to(torch.float32).permute(0, 2, 1, 3).reshape(b, nr, h * d), dim=-1)
+        ft = torch.nn.functional.normalize(v_tgt.to(torch.float32).permute(0, 2, 1, 3).reshape(b, n_img, h * d), dim=-1)
+        sim = fr @ ft.transpose(1, 2)                      # (B, Nr, n_img)
+        conf, best_t = sim.max(dim=2)                      # per reference token
+        keep = conf >= self.cfg.match_threshold
+        if self.cfg.match_mutual:
+            best_r = sim.argmax(dim=1)                     # (B, n_img): best reference token per target token
+            keep = keep & (torch.gather(best_r, 1, best_t) == torch.arange(nr, device=kr.device)[None])
+        ids_t = ad.image_ids_for_span(st.tgt_x, s0, st.to).to(kr.device)       # (n_img, 3)
+        ids_r = ad.image_ids_for_span(st.ref_x, st.ref_s0, st.to).to(kr.device)  # (Nr, 3)
+        if ids_r.shape[0] != nr or ids_t.shape[0] != n_img:
+            raise AdapterError("ZQX: token/position count mismatch in matched mode")
+        delta = ids_t[best_t] - ids_r[None]               # (B, Nr, 3)
+        freqs = ad.rope_freqs(delta.reshape(-1, 3).float())          # (1, 1, B*Nr, D/2, 2, 2)
+        freqs = freqs.reshape(b, nr, *freqs.shape[-3:])
+        kr = apply_rotation(kr, freqs.unsqueeze(1).to(kr.device))
+        st.match_frac.append(float(keep.float().mean()))
+        return kr, keep.to(torch.float32)
 
     # ------------------------------------------------------------------ attention override
     def _next(self, func, args, kwargs):
@@ -350,29 +400,42 @@ class ReferenceAttentionPatch:
         mask_in_args = len(args) > 4
         mask = args[4] if mask_in_args else kwargs.get("mask", None)
         n = k.shape[2]
-        st.trace.append((st.mode, bi))
+        plain = not passes.blocked(self, ("foreign", "variant"))
 
         if st.mode == "capture":
-            s0, s1 = st.ref_layout.span(n)
+            if not plain:      # another patch's extra pass inside our capture pass: not ours to record
+                return self._next(func, args, kwargs)
+            st.trace.append((st.mode, bi))
+            s0, s1 = st.ref_layout.span(q.shape[2])
+            st.ref_s0 = s0
             st.store[bi] = (k[:, :, s0:s1].detach().clone(), v[:, :, s0:s1].detach().clone())
             return self._next(func, args, kwargs)
 
-        # inject
+        # inject (also into other patches' variant passes, never into their foreign passes)
+        if passes.blocked(self, ("foreign",)):
+            return self._next(func, args, kwargs)
+        if plain:
+            st.trace.append((st.mode, bi))
         if bi not in st.store:
             raise AdapterError(f"ZQX: no captured reference for block {bi}")
         kr, vr = st.store[bi]
         b = q.shape[0]
         if kr.shape[0] != b or kr.shape[1] != k.shape[1] or kr.shape[-1] != k.shape[-1]:
             raise AdapterError(f"ZQX: captured reference {tuple(kr.shape)} incompatible with keys {tuple(k.shape)}")
-        kr = apply_rotation(kr.to(k.dtype), st.rot.to(k.device))
+        s0, s1 = st.layout.span(q.shape[2])
+        kmask = st.kmask
+        if st.rot is not None:
+            kr = apply_rotation(kr.to(k.dtype), st.rot.to(k.device))
+        else:
+            kr, keep = self._match_and_rotate(kr.to(k.dtype), vr, v[:, :, s0:s1], s0, st)
+            kmask = kmask.to(keep.device) * keep
         if self.cfg.key_scale != 1.0:
             kr = kr * self.cfg.key_scale
         vr = vr.to(v.dtype)
-        s0, s1 = st.layout.span(n)
         nq = q.shape[2]
         qmask = torch.zeros((b, nq), dtype=torch.float32, device=q.device)
         qmask[:, s0:s1] = st.qmask_img
-        bias = reference_log_bias(qmask, st.kmask, self.cfg.weight, dtype=torch.float32)
+        bias = reference_log_bias(qmask, kmask, self.cfg.weight, dtype=torch.float32)
         mdtype = q.dtype if q.dtype in (torch.float16, torch.bfloat16, torch.float32, torch.float64) else torch.float32
         full = build_extended_mask(mask, bias, b, nq, n, mdtype, q.device)
         k2 = torch.cat([k, kr], dim=2)

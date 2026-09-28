@@ -118,6 +118,25 @@ class ModelAdapter:
     def total_blocks(self) -> int:  # pragma: no cover - abstract
         raise NotImplementedError
 
+    # (regex, kind) checked in order; kinds: text, modulation, attention, mlp, io
+    module_kind_rules: List[Tuple[str, str]] = []
+    MODULE_KINDS = ("text", "modulation", "attention", "mlp", "io", "other")
+
+    # token stream a module's input lives in: image | text | joint | nonspatial
+    stream_rules: List[Tuple[str, str]] = []
+
+    def module_stream(self, model_key: str) -> str:
+        for rx, stream in self.stream_rules:
+            if re.search(rx, model_key):
+                return stream
+        raise AdapterError(f"ZQX: no token-stream rule for {model_key}")
+
+    def module_kind(self, model_key: str) -> str:
+        for rx, kind in self.module_kind_rules:
+            if re.search(rx, model_key):
+                return kind
+        return "other"
+
     # -- misc -----------------------------------------------------------------------------
     @property
     def base_model(self):
