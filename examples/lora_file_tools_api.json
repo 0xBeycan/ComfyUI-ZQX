@@ -1,0 +1,49 @@
+{
+ "1": {
+  "class_type": "UNETLoader",
+  "inputs": {
+   "unet_name": "z_image_turbo_bf16.safetensors",
+   "weight_dtype": "default"
+  }
+ },
+ "2": {
+  "class_type": "ZQXLoRASurgery",
+  "inputs": {
+   "model": [
+    "1",
+    0
+   ],
+   "lora_name": "my_character_zit.safetensors",
+   "strength": 1.0,
+   "block_weights": "",
+   "drop_kinds": "modulation",
+   "max_rank": 0,
+   "energy_keep": 0.9,
+   "spectrum_power": 1.0,
+   "power_preserve": "top",
+   "dare_drop": 0.0,
+   "seed": 0,
+   "filename_prefix": "char_surgery",
+   "save_dtype": "bfloat16"
+  }
+ },
+ "3": {
+  "class_type": "ZQXLoRACommonSubspace",
+  "inputs": {
+   "model": [
+    "1",
+    0
+   ],
+   "lora_1": "char_a_zit.safetensors",
+   "lora_2": "char_b_zit.safetensors",
+   "lora_3": "None",
+   "lora_4": "None",
+   "common_rank": 4,
+   "mode": "clean_target",
+   "target_lora": "my_character_zit.safetensors",
+   "lam": 1.0,
+   "filename_prefix": "char_common_clean",
+   "save_dtype": "bfloat16"
+  }
+ }
+}

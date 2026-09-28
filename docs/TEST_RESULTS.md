@@ -4,10 +4,10 @@ Environment: CPU only (4 cores), Python 3.11.15, torch 2.14.0 (CPU execution), p
 ComfyUI **`8d534945ebd53cff61e8def81757c6a6c1b9cf2d`** (2026-09-27), run on 2026-09-28.
 
 ```
-COMFYUI_PATH=/path/to/ComfyUI python -m pytest tests/ -q      ->  93 passed
-python -m pytest tests/ -q   (no ComfyUI)                     ->  21 passed, 72 skipped (pure-math tests only)
-python tests/e2e/run_e2e.py http://127.0.0.1:8199             ->  E2E PASSED (Z-Image + Qwen, 4 prompts)
-python tests/e2e/validate_examples.py http://127.0.0.1:8199   ->  3/3 example workflows OK
+COMFYUI_PATH=/path/to/ComfyUI python -m pytest tests/ -q      ->  151 passed
+python -m pytest tests/ -q   (no ComfyUI)                     ->  33 passed, 118 skipped (pure-math tests only)
+python tests/e2e/run_e2e.py http://127.0.0.1:8199             ->  E2E PASSED (Z-Image + Qwen, 6 prompts, all 24 nodes)
+python tests/e2e/validate_examples.py http://127.0.0.1:8199   ->  7/7 example workflows OK
 ```
 
 **How the models were tested.** Tiny *real* ComfyUI models: `comfy.supported_models.ZImage` / `QwenImage` config
@@ -17,7 +17,8 @@ width 64–256, random weights with fixed seeds), wrapped in the real `ModelPatc
 with sampler-identical `transformer_options`.  Building through `supported_models` worked, no direct instantiation
 was needed.  Z-Image's `z_image_modulation` requires dim ≥ 256, hence dim 256.  End-to-end: a headless ComfyUI server
 with this pack + **test-only stub nodes** (`tests/e2e/zqx_e2e_stubs`, which provide the tiny models / random
-conditioning, because real weights cannot be downloaded here) executes two-pass API graphs.  They use every ZQX node,
+conditioning, and stand-in VAE / CLIP-vision objects, because real weights cannot be downloaded here) executes
+two-pass API graphs plus one graph chaining all nodes added in 0.2.0.  They use every ZQX node,
 KSampler, SamplerCustomAdvanced and LatentUpscaleBy, and reload the LoRA file written by ZQX LoRA Arithmetic.
 
 ## Per node
@@ -34,6 +35,24 @@ KSampler, SamplerCustomAdvanced and LatentUpscaleBy, and reload the LoRA file wr
 | ZQX Sigma Split Guider | guidance interval (2404.07724), Distilling Diversity (2503.10637) | `test_guider`: equal cfgs **bitwise ==** core CFGGuider (cfg 1 and 3, txt2img/img2img); cfg_early used exactly for σ ≥ switch; model_early never used → bitwise == main model; always used → == early model alone (≤ 1e-6); mixed run uses both; shared-weights model_early refused | Z-Image Base availability / compatibility with Turbo LoRAs; VRAM with two models |
 | ZQX Sigmas To Text, ZQX Block Spec | helpers | E2E (live server) | — |
 | All nodes | — | registration in a live ComfyUI (`/object_info`: 10 ZQX nodes with the documented inputs/outputs); E2E API execution of two-pass graphs for Z-Image and Qwen (SamplerCustomAdvanced pass 1 + LatentUpscaleBy + KSampler denoise 0.5 pass 2); example workflows validated against `/object_info` | real checkpoints; GPU attention backends (read in code, not run: with the extended mask, `attention_sage` without mask support and `attention_flash` route the call to PyTorch SDPA with the mask, i.e. injected steps lose the sage/flash speed-up); fp8 weights |
+
+### Added in 0.2.0
+
+| Node | Source | Tests passed | NOT verifiable on CPU / here |
+|---|---|---|---|
+| Reference Attention `matched` | FreeGraftor (2504.15958), CharaConsist (2507.11533) | reference = target → every token matches itself (block 0) and the result is close to `same`; impossible threshold → equals the unpatched model; a reference shifted by one column → every key rotated exactly to its shifted target position (≤ 5e-5) | whether value-vector matching finds good correspondences between a passport photo and a new pose |
+| Spatial LoRA | LoRAShop (2505.23758) | all weights 1 == LoraLoaderModelOnly through the sampler (Qwen incl. text-stream and modulation modules, Z-Image incl. fused qkv slices; txt2img / img2img, ≤ 5e-5); all-zero / strength-0 → bitwise identity; hook-level: delta == x Aᵀ Bᵀ·s·scale on weighted tokens only, exactly 0 elsewhere; two masked LoRAs chained run | seam artefacts at mask edges on real images |
+| LoRA Guidance | autoguidance-style model difference (2406.02507) | w = 1 single forward, w = 0 bitwise base, w = 2.5 == base + 2.5(lora − base) (≤ 1e-5); sigma ramp endpoints; runs in the sampler | good w schedules |
+| DiT PAG | PAG (2403.17377) | scale 0 / out-of-window bitwise identity; identity-attention rows == own V (both output layouts); result == out + s(out − independently computed perturbed out); middle block selection; uncond rows untouched with cond_only | visual effect / whether it helps against the AI look |
+| Activation Steering | ActAdd (2308.10248) | alpha 0 / out-of-window / towards == away → bitwise identity; 1-block model, token mode, towards = A, away = main prompt → output == model run with prompt A (≤ 1e-5); mean mode + cond_only leaves uncond rows untouched | which blocks carry pose / gaze |
+| UCE Text Edit | UCE (2308.14761) | normal equations hold (1e-9); tiny λ satisfies the edits exactly; huge λ or already-satisfied targets → W unchanged; preservation set reduces drift; the patched projection maps the source mean onto the target mean; strength 0 adds no patch | size of the effect on real prompts |
+| LoRA Surgery | Eckart–Young, DARE (2311.03099) | LoRA SVD exact; truncation error == reported == Eckart–Young; spectrum power p = 1 identity, Frobenius / top preservation, singular vectors unchanged; DARE on the up factor unbiased (400 draws) and low rank; module-kind classification; save → ComfyUI loader reproduces the surgery exactly (both models) | whether the hypotheses (modulation / weak directions carry the look) hold |
+| LoRA Common Subspace | Iso-CTS-inspired (2502.04959) | recovers a planted shared subspace (principal-angle cosines > 0.97); energy fractions == dense computation; cleaned LoRA orthogonal to the subspace; common component == U Uᵀ mean | meaning of the common subspace for real synthetic-pipeline LoRAs |
+| Scorers | InsightFace / CLIP (external), Laplacian (model-free) | background sharpness separates an evenly sharp image from a bokeh-like one; off-centre geometry; z-score combine and raw combine; Face scorer plumbing with a stand-in analyser (identity 1 for the reference, off-centre / head-turn ordering, no-face handling, errors); combined-scorer name collisions | real InsightFace / CLIP models (not downloadable here) |
+| Seed Search | first-step layout (2503.10637), Group Inference | picks the candidates with the best scores; kept samples bitwise equal to normal runs with those seeds; full-length probe preview == decoded final sample; argument checks (both models) | usefulness of 1-step previews for face detection on real models |
+| Realism LoRA Ablation | measurement protocol (heuristic) | selection rule; end-to-end scan with blocks / blocks+kinds / blocks+svd on a tiny model (A identity == reference, generation count, removed units == positive-gain units, removed keys absent from the result); runtime LoRA from factors == ComfyUI merged loading (≤ 1e-5); removing everything reproduces A bitwise | real identity / realism trade-offs |
+| Pose Bank | — | tag and aspect filtering, determinism in the seed, error when nothing matches; node crops to the output size | — |
+| Chained patches (`test_combo.py`) | — | every multi-pass patch chained (spatial LoRA, LoRA guidance, PAG, steering, CADS, reference attention frame / matched) in two install orders, both models, txt2img + img2img: runs, finite, deterministic; the reference capture is bitwise unchanged when steering or PAG are installed before *or* after it; pass-stack rules | compute cost of long chains on real models |
 
 ## Tolerances (why not bitwise everywhere)
 * Rotation composition: angles are computed in float32 by ComfyUI's `rope()`; |pos·ω| up to ~70 rad → ~5e-5 absolute.

@@ -48,8 +48,8 @@ Training-free levers fall into five groups, each acting at a different place:
 |---|---|---|---|---|
 | Personalize Anything (2503.12590) | copy the (inverted ≈ forward-noised) reference's image tokens into the target region while t > τ (code τ = 0.6), then shared attention | yes | Flux | **locks layout** → reproduces the passport pose; not suited to the goal |
 | FreeCus (2507.15249) | reference less noised than the target (negated shift μ), reference foreground K scaled ×1.1 and prepended, only in Flux vital layers [0,1,2,17,18,25,28,53,54,56] | yes | Flux | **implemented as options** (ref_sigma_mult, key_scale, blocks) |
-| CharaConsist (2507.11533) | reference K re-RoPE'd to the matched target token position (point tracking, cos-sim > 0.5 from a pre-run), output merge α = 0.8 → 0 | yes | Flux | best for pose freedom; needs a pre-run for correspondences → not implemented (future work) |
-| FreeGraftor (2504.15958) | per-block cycle-consistent matching, grafting, dropout 0.2·t | yes | Flux | same as above |
+| CharaConsist (2507.11533) | reference K re-RoPE'd to the matched target token position (point tracking, cos-sim > 0.5 from a pre-run), output merge α = 0.8 → 0 | yes | Flux | best for pose freedom; its pre-run correspondences are replaced by per-block value-vector matching → **implemented as `matched` placement (0.2.0)** |
+| FreeGraftor (2504.15958) | per-block cycle-consistent matching, grafting, dropout 0.2·t | yes | Flux | per-block matching + mutual-NN check **implemented** in `matched` placement |
 | Stable Flow (2411.14430) | vital layers via block-skip + DINOv2; K/V replacement in vital layers | yes | Flux/SD3 | layer-finding protocol; our Block Spec node supports the same ablation |
 | FreeFlux (2503.16153) | position-dependent layers [1,2,4,26,30,54,55] vs content-dependent layers in Flux | yes | Flux | inject only into content layers → less layout copying; indices must be re-measured for Qwen / Z-Image |
 | DiTCtrl, KV-Edit | KV sharing / KV-cache editing in MM-DiT | yes | MM-DiT | editing-oriented |
@@ -108,6 +108,9 @@ Key formats (code-verified in musubi-tuner / ai-toolkit): musubi Qwen-Image `lor
 Ranked by (expected impact on the scene-level AI look while preserving identity) × (confidence that the mechanism
 transfers to Z-Image / Qwen) ÷ (risk of breaking the distilled model).  All are implemented unless stated.
 
+Items 8–11 were added in 0.2.0; by expected value, seed search (8) and the identity-safe realism LoRA (9) belong
+right after item 1, which is also the order used in the README test plan.
+
 1. **Sigma-scheduled LoRA strengths (ZQX Scheduled LoRA)** — heuristic built on the robust finding that flow models fix
    layout/pose in the first steps (Distilling Diversity §2; guidance interval) and that LoRAs act additively.  Weak
    character LoRA + strong realism in σ ≳ 0.8, then the reverse.  Zero cost, no re-patching, works in both passes (the
@@ -130,6 +133,19 @@ transfers to Z-Image / Qwen) ÷ (risk of breaking the distilled model).  All are
    "AI-look LoRA" exists (then `clean_col` with that LoRA is the principled operation).
 7. **Low-frequency noise from a real photo** — cheap composition/lighting prior, FreeInit-style; risk of colour casts at
    high strength / high cutoff.
-8. Not implemented, worth doing later: matched-position reference attention (CharaConsist / FreeGraftor), per-model
-   vital-layer measurement (Stable Flow / FreeFlux protocol), Iso-CTS common-subspace estimate from several synthetic
-   character LoRAs, perturbation guidance for Z-Image (needs a block-skip hook the model lacks).
+8. **First-step seed search with face / background scorers (0.2.0)** — selection instead of modification: distilled
+   models fix the layout in the first step, so scoring 1–2-step previews (head turn, off-centre, identity, background
+   sharpness) and keeping the best seeds directly targets measurable AI-look attributes without touching the model.
+   High value, cost = candidates × probe steps.
+9. **Identity-safe realism LoRA via ablation scan (0.2.0)** — the realism LoRA, not the character LoRA, is edited:
+   units whose removal restores ArcFace identity at little CLIP-measured realism cost are removed.  Lower risk than
+   editing the character LoRA; heuristic one-at-a-time attribution.
+10. **Spatial LoRA (LoRAShop, 2505.23758)** — realism and character LoRAs on disjoint token regions in the same step;
+    needs a face region (pass 2, or from a known pose).
+11. **Pose bank + ControlNet** — composition from real photos; strongest composition lever, needs a curated bank.
+12. **LoRA guidance, activation steering (ActAdd, 2308.10248), UCE (2308.14761), DiT PAG (2403.17377), LoRA surgery,
+    common subspace (Iso-CTS-inspired)** — implemented as experimental levers; weaker priors that they address the
+    scene-level look specifically.
+13. Still not implemented: per-model vital-layer measurement protocol automation (Stable Flow / FreeFlux — Block Spec
+    + scorers make a manual sweep possible), reward-gradient guidance (impractical memory on Qwen 20B), StyleAligned
+    AdaIN (deliberately excluded), NAG (excluded).

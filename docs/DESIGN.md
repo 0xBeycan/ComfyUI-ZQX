@@ -11,7 +11,10 @@ by the tests in `tests/`.
 | `patches["attn1_patch"]` | `qwen_image/model.py::Attention.forward` | joint q/k/v (B,H,N,D) **after QK-norm, before RoPE**, `pe`, `img_slice=[txt, txt+img]` | Qwen only; the returned `attn_mask` is *not* used by the attention call (the additive mask is built before the patch), so it cannot add keys with a bias. Not used. |
 | `transformer_options["optimized_attention_override"]` | `ldm/modules/attention.py::wrap_attn` | `(func, q, k, v, heads, mask, skip_reshape=True, transformer_options=…)` for **every** attention call, post-RoPE, after `AttentionTensorContainer`s are unwrapped | Works for Qwen **and** Z-Image (the only per-attention hook Z-Image has). **Used** for reference capture/inject; chains to a previously installed override. |
 | `patches_replace["dit"]` (`("double_block", i)`) | `qwen_image/model.py::_forward` | whole-block replacement | Qwen only; NextDiT (Z-Image) has no `patches_replace` → core `SkipLayerGuidanceDiT` cannot work on Z-Image. Not used. |
-| `patches["double_block"]`, `patches["post_input"]`, `patches["noise_refiner"]` | both models | block outputs / embeddings | not needed |
+| `patches["double_block"]` | both models (Qwen after each double block, Z-Image after each main layer with `img` = image part) | block output hidden states | **Used** by Activation Steering (Qwen expects both `img` and `txt` back). |
+| `patches["post_input"]`, `patches["noise_refiner"]` | both models | embeddings / refiner outputs | not needed |
+| PyTorch `register_forward_hook` on Linear modules | any | per-call module output | **Used** by Spatial LoRA, registered only for the duration of one model call and removed in `finally`. |
+| `ModelPatcher.add_patches({key: ("diff", (tensor,))})` | `model_patcher.py`, `lora.py::calculate_weight` | dense weight delta | **Used** by UCE Text Edit. |
 | `set_model_unet_function_wrapper` | `samplers.py::_calc_cond_batch` | wraps `apply_model` | single slot, conflicts with other nodes → not used |
 | `WrappersMP.DIFFUSION_MODEL` | `QwenImageTransformer2DModel.forward`, `NextDiT.forward` | `(executor, x, timestep, context, …)`, composable, keyed | **Used** by every model-patch node (reference passes, CADS context corruption, sigma publication for runtime LoRA). |
 | `ModelPatcher.add_weight_wrapper(key, fn)` | `model_patcher.py` (→ `m.weight_function`), `ops.py::cast_bias_weight` | function applied to the cast weight at every forward, after regular/low-vram LoRA patches | **Used** for sigma-scheduled / K-LoRA runtime LoRAs (no re-patching between steps). |
@@ -133,16 +136,81 @@ by its own `extra_conds`).  Refuses a `model_early` that shares the base weights
 in place, so two LoRA variants of one checkpoint cannot be active in the same run → use Scheduled LoRA) and different
 latent formats.
 
-## 5. Principles
+## 5. Additions in 0.2.0
+
+### 5.1 Pass context (`zqx/patches/passes.py`)
+Several patches launch extra forwards inside one model call: reference capture (other image), steering
+towards/away (other prompt), PAG perturbed pass and LoRA-guidance base pass (same inputs, modified model).  Chaining
+them showed three real failure modes (all reproduced by `tests/test_combo.py` before the fix):
+* hooks of one patch acted inside another patch's extra pass (steering injected into the reference capture pass;
+  reference capture recorded the PAG-perturbed pass);
+* Z-Image's refiner blocks run before `block_index` is set, so a second forward launched by a wrapper saw the stale
+  index of the previous forward and refiner attention calls were mistaken for main-block calls;
+* PAG computed token spans from the key length after reference attention had appended keys.
+
+Fix: every ZQX wrapper pushes `enter` / `foreign` / `variant` entries on a thread-local stack; capture hooks act only
+in their own plain pass, injection hooks in plain and variant passes but never in another patch's foreign pass;
+activation-level wrappers (reference attention, steering, PAG) stay passive inside any foreign pass whatever the
+install order, while model-defining patches (runtime / spatial LoRA, LoRA guidance, CADS) keep acting so an extra
+pass sees the same model; every launched forward clears the stale `block_index`; spans are taken from the query
+length.  Spatial LoRA computes its token layout from the innermost entry (the forward actually running).
+
+### 5.2 Spatial LoRA
+LoRA factors come from ComfyUI's own `load_lora` (plain LoRA adapters only).  Each target Linear gets a forward hook
+adding `w_token · s(σ) · scale · (x Aᵀ) Bᵀ` into the output (into the slice for fused Z-Image qkv).  Token weights per
+input stream (adapter `stream_rules`): `image` (target tokens → mask, trailing QIE-ref / padding tokens →
+other_weight), `text`, `joint` (Z-Image main layers and final layer: caption | image | padding), `nonspatial`
+(modulation layers, 2-D inputs).  All-ones = LoraLoader (tested); all-zero installs no hook (bitwise identity).
+
+### 5.3 LoRA guidance, DiT PAG, steering
+* LoRA guidance toggles the runtime-LoRA weight functions (`enabled`) between two forwards and combines the model
+  outputs linearly (the denoised output is affine in the model output, so the combination is exact on either).
+* PAG: in the perturbed forward the override returns, for image-query rows, the query's own value vector (identity
+  attention map); text rows keep normal attention.  Scale applies to cond rows before CFG.
+* Steering: towards/away passes with the steering prompts (Qwen: `attention_mask` from the conditioning dict; Z-Image:
+  `num_tokens` = prompt length), captured by the double-block hook, injected as `alpha · (h_t − h_a)` on image tokens.
+
+### 5.4 UCE Text Edit
+Closed form `W' = (λW + Σ v* cᵀ + Σ W c_k c_kᵀ)(λI + Σ c cᵀ + Σ c_k c_kᵀ)⁻¹` on the text input projection, with
+`c` = the model's own RMS-normalised text-encoder output (the norm module is called, not re-implemented) and λ
+relative to the mean squared norm of all input vectors (scale-free).  Written as a `diff` weight patch.
+
+### 5.5 Matched reference positions
+In `matched` mode no global Δ is used.  In each injected block the value vectors (which carry no RoPE) of the reference
+and target image tokens are compared by cosine similarity over all heads; each reference token takes the position of
+its best target token (threshold, optional mutual-nearest-neighbour check), its key is rotated by `R(p_t − p_r)`
+built per token with the model's embedder, and unmatched tokens are masked.  Tested: with reference = target the
+matching is the identity; with a reference that is the target shifted by one column every key lands exactly on the
+shifted position.
+
+### 5.6 Scoring, seed search, ablation scan, pose bank
+* Scorers return named metrics + weights; seed search z-normalises every metric across the candidates before
+  weighting (scale-free), the ablation scan uses raw weighted means (absolute changes matter there).
+* Seed search decodes the sampler callback's x0 (`process_latent_out` → VAE) after `probe_steps`, then re-samples the
+  kept seeds from scratch with the same noise (tested: identical to a normal run with that seed; a full-length probe's
+  preview equals the decoded final sample).
+* Ablation scan evaluates A / C / C′ with runtime LoRAs built from model-key-space factors (tested equal to ComfyUI's
+  merged loading) and writes the cleaned factors in the generic key format.
+* Pose bank: deterministic `random.Random(seed)` over the sorted candidate list after tag and aspect filtering.
+
+### 5.7 Backwards compatibility
+New inputs of existing nodes are optional (`match_threshold`, `match_mutual`), so workflows saved with 0.1.x still
+validate.  Node ids are unchanged; only the menu categories moved from `ZQX Experimental` to `ZQX/...`.
+
+## 6. Principles
 * Pure math in `zqx/core` (no ComfyUI import), tested directly; glue in `zqx/patches`, UI in `zqx/nodes`.
 * No hidden fallback: unsupported model / arguments / layouts raise with a message.  Explicit opt-outs are node inputs
   (`allow_unmatched_keys`).
 * Disabled settings short-circuit to the unpatched call, so "off" is bitwise "off".
 
-## 6. Known limitations
+## 7. Known limitations
 * Area / regional conditioning (`ConditioningSetArea`) crops the latent per cond; query masks then refer to the crop.
   Not supported deliberately; results would be undefined.
 * Multi-GPU (`multigpu_clones`) calls the model from worker threads; the patches keep per-call state on the patch
   object and are not thread-safe.  Unsupported.
 * `torch.compile` of the diffusion model bypasses Python-level wrappers in parts; untested.
 * Reference attention requires one extra forward per in-window step (`noised`) and the memory noted above.
+* Multi-pass nodes multiply compute when chained (each wrapper runs its passes around the inner ones; activation
+  patches skip foreign passes, but e.g. LoRA guidance inside steering doubles steering's passes).
+* Non-ZQX DIFFUSION_MODEL wrappers that launch several forwards do not clear a stale `block_index`; on Z-Image that
+  could make refiner calls look like block calls to the ZQX attention hooks.

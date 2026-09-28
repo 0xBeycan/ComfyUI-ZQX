@@ -1,0 +1,154 @@
+{
+ "1": {
+  "class_type": "UNETLoader",
+  "inputs": {
+   "unet_name": "z_image_turbo_bf16.safetensors",
+   "weight_dtype": "default"
+  }
+ },
+ "2": {
+  "class_type": "CLIPLoader",
+  "inputs": {
+   "clip_name": "qwen_3_4b.safetensors",
+   "type": "lumina2",
+   "device": "default"
+  }
+ },
+ "3": {
+  "class_type": "VAELoader",
+  "inputs": {
+   "vae_name": "ae.safetensors"
+  }
+ },
+ "4": {
+  "class_type": "ModelSamplingAuraFlow",
+  "inputs": {
+   "model": [
+    "1",
+    0
+   ],
+   "shift": 3.0
+  }
+ },
+ "5": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "model": [
+    "4",
+    0
+   ],
+   "lora_name": "my_character_zit.safetensors",
+   "strength_model": 1.0
+  }
+ },
+ "6": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "2",
+    0
+   ],
+   "text": "photo of <trigger> woman sitting in a cafe, candid"
+  }
+ },
+ "7": {
+  "class_type": "ConditioningZeroOut",
+  "inputs": {
+   "conditioning": [
+    "6",
+    0
+   ]
+  }
+ },
+ "8": {
+  "class_type": "EmptySD3LatentImage",
+  "inputs": {
+   "width": 832,
+   "height": 1216,
+   "batch_size": 1
+  }
+ },
+ "9": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "passport_reference.png"
+  }
+ },
+ "10": {
+  "class_type": "ZQXScorerFace",
+  "inputs": {
+   "model_name": "buffalo_l",
+   "provider": "CUDA",
+   "w_identity": 1.0,
+   "w_off_center": 0.0,
+   "w_head_turn": 0.0,
+   "w_face_found": 0.5,
+   "reference": [
+    "9",
+    0
+   ]
+  }
+ },
+ "11": {
+  "class_type": "CLIPVisionLoader",
+  "inputs": {
+   "clip_name": "clip_vision_h.safetensors"
+  }
+ },
+ "12": {
+  "class_type": "ZQXRealismLoRAAblation",
+  "inputs": {
+   "model": [
+    "5",
+    0
+   ],
+   "realism_lora": "my_realism_zit.safetensors",
+   "realism_strength": 0.8,
+   "positive": [
+    "6",
+    0
+   ],
+   "negative": [
+    "7",
+    0
+   ],
+   "latent_image": [
+    "8",
+    0
+   ],
+   "vae": [
+    "3",
+    0
+   ],
+   "identity_scorer": [
+    "10",
+    0
+   ],
+   "clip_vision": [
+    "11",
+    0
+   ],
+   "seeds": "1, 2, 3, 4, 5, 6",
+   "steps": 8,
+   "cfg": 1.0,
+   "sampler_name": "res_multistep",
+   "scheduler": "simple",
+   "units": "blocks+svd",
+   "svd_blocks": 3,
+   "svd_components": 4,
+   "min_identity_gain": 0.005,
+   "max_realism_drop": 0.02,
+   "filename_prefix": "realism_idsafe",
+   "save_dtype": "bfloat16"
+  }
+ },
+ "13": {
+  "class_type": "PreviewImage",
+  "inputs": {
+   "images": [
+    "12",
+    2
+   ]
+  }
+ }
+}

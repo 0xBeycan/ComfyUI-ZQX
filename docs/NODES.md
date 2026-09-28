@@ -1,6 +1,7 @@
 # ZQX nodes — detailed reference
 
-All nodes are in the **ZQX Experimental** category.  They are all training-free, work with Z-Image Turbo (ZIT),
+All nodes are under the **ZQX** menu (`ZQX/attention`, `ZQX/lora`, `ZQX/guidance`, `ZQX/model-edit`,
+`ZQX/sampling`, `ZQX/scoring`, `ZQX/tools`).  They are all training-free, work with Z-Image Turbo (ZIT),
 Qwen-Image 2512 and Qwen-Image-Edit 2511, and can be used in both passes of the **two-pass** workflow (base pass +
 latent upscale + img2img pass with denoise < 1).
 
@@ -40,7 +41,7 @@ Verified on Qwen: with a 1-block model the node's output equals QIE's own refere
 | `weight` | `log(w)` is added to the reference logits. 1 = plain concatenation, 0 = off (bitwise-identical output), > 1 = more attention to the reference. |
 | `sigma_start`, `sigma_end` | Sigma window (see the note above). |
 | `blocks` | Main blocks to inject into: `all` or e.g. `0-19, 30-45`. Qwen has 60 blocks, ZIT has 30. Z-Image refiner blocks are never modified. |
-| `position_mode` | RoPE position of the reference. `frame`: the next frame/t index (the placement QIE uses for its references; recommended). `right`/`below`: right of / below the canvas (diptych prior). `same`: the same positions as the target — **copies the reference layout (frontal pose, centred framing)**, which works against the goal. |
+| `position_mode` | RoPE position of the reference. `frame`: the next frame/t index (the placement QIE uses for its references; recommended). `right`/`below`: right of / below the canvas (diptych prior). `same`: the same positions as the target — **copies the reference layout (frontal pose, centred framing)**, which works against the goal. `matched`: every reference token is moved to the position of the target token whose value vector is most similar (FreeGraftor / CharaConsist style), so the reference follows the *generated* pose instead of imposing its own. |
 | `capture_mode` | `noised`: the reference is noised to the current sigma every step (+1 forward pass per step). `cached`: captured once at `cache_sigma` and reused for all steps (cheap). |
 | `cache_sigma` | Noise level of the reference in `cached` mode; 0 = clean (QIE 2511's `index_timestep_zero` convention). |
 | `ref_sigma_mult` | In `noised` mode the reference noise level is mult·σ. FreeCus gives the reference slightly less noise than the target (< 1). |
@@ -48,6 +49,8 @@ Verified on Qwen: with a 1-block model the node's output equals QIE's own refere
 | `token_dropout` | Randomly drops this fraction of reference tokens each step (ConsiStory: 0.5). **Reduces copying of the reference layout.** |
 | `inject_uncond` | Also inject into the uncond branch when CFG > 1. Off = the reference effect is amplified by CFG (stronger, riskier). Has no effect on ZIT (CFG = 1). |
 | `noise_seed` | Seed for the reference noise and the dropout. |
+| `match_threshold` (opt.) | `matched` mode: minimum cosine similarity of value vectors for a reference token to be used (default 0.5). Lower = more tokens matched. |
+| `match_mutual` (opt.) | `matched` mode: keep only mutual nearest neighbours (default on; FreeGraftor-like cycle check). |
 | `query_mask` (opt.) | Region of the generated image allowed to look at the reference (e.g. the face). Area-averaged down to the token grid. All zeros → node behaves as off. |
 | `key_mask` (opt.) | Visible part of the reference (e.g. only the reference face, so its clean/bokeh background does not leak). |
 
@@ -305,6 +308,221 @@ two models into memory at once.
 
 ---
 
+## 10. ZQX Spatial LoRA (masked)
+
+**What it does:** runs a LoRA as a side branch whose output is multiplied **per token** by a mask, instead of
+merging it into the weights (which applies it to every token).  Typical use: realism LoRA everywhere except the face
+(`mask` = face, `invert_mask` on) and character LoRA only on the face — both at full strength in the same step, so
+they no longer fight over the face.  With all weights 1 the output equals `LoraLoaderModelOnly` (tested).
+
+**Source:** LoRAShop (arXiv 2505.23758) restricts subject LoRAs to their region; the token-level side branch is our
+implementation (forward hooks, active only during each model call).
+
+| Parameter | Meaning |
+|---|---|
+| `lora_name` | Plain LoRA only (no DoRA / LoCon mid / LoKr). |
+| `strength_early`, `strength_late`, `sigma_hi`, `sigma_lo` | Sigma ramp as in Scheduled LoRA. |
+| `mask` (opt.) | Region of the **generated** image (resized to the token grid). None = everywhere. |
+| `invert_mask` | Apply where the mask is 0. |
+| `text_weight` | Weight on text tokens (Qwen text stream, Z-Image caption tokens). |
+| `nonspatial_weight` | Weight on modulation / timestep layers — they act on the whole image, so 0 keeps a masked-out region truly untouched. |
+| `other_weight` | Weight on QIE reference tokens and Z-Image padding tokens. |
+
+**Start:** realism LoRA: mask = face, invert on, strength 0.8, nonspatial_weight 0; character LoRA: mask = face,
+strength 1.0.  The face position must be known: use it in **pass 2** with a mask of the pass-1 face (drawn, or from a
+face-detection node pack), or with a pose from the Pose Bank whose face region you know.
+
+**Risks:** hard mask edges can leave seams — blur the mask; LoRA effects propagate through attention, so a masked
+LoRA still influences neighbouring tokens indirectly (by design it is not a pixel-perfect separation).
+
+---
+
+## 11. ZQX LoRA Guidance (LoRA-CFG)
+
+**What it does:** `out = out_base + w · (out_lora − out_base)` with a sigma schedule for `w`.  `w = 1` is the plain LoRA
+(one forward), `w = 0` the base model, `w > 1` amplifies the LoRA.  E.g. the character LoRA with `w` 0.3 in the layout
+steps (the base model decides pose/scene) and 1.3–1.5 in the detail steps (identity amplified).
+
+**Source:** heuristic; the model-difference form of classifier-free guidance, related to autoguidance
+(arXiv 2406.02507).  Two forwards per step when `w ∉ {0, 1}`.
+
+| Parameter | Meaning |
+|---|---|
+| `lora_name`, `strength` | The LoRA and its strength in the "with LoRA" forward. |
+| `w_early`, `w_late`, `sigma_hi`, `sigma_lo` | Guidance weight ramp over sigma. |
+
+**Start:** ZIT: w 0.3 → 1.3, σ 0.85 / 0.6.  Qwen 2512: w 0.5 → 1.3.  **Risks:** `w > 1.5` over-sharpens / burns;
+doubles compute inside the ramp.
+
+---
+
+## 12. ZQX Perturbed Attention Guidance (DiT)
+
+**What it does:** an extra forward in which the selected blocks use an *identity* attention map for image queries
+(each image token attends only to itself); `out += scale · (out − out_perturbed)`.  Adds a structure/realism signal
+**at CFG 1**, where CFG tweaks do nothing.  ComfyUI's core PAG patches a UNet-only location and core
+`SkipLayerGuidanceDiT` cannot hook Z-Image; this works for both Qwen-Image and Z-Image.
+
+**Source:** PAG (arXiv 2403.17377), adapted to joint-attention DiTs through the attention override.
+
+| Parameter | Meaning |
+|---|---|
+| `scale` | Guidance scale.  Applied to cond rows before CFG: with CFG > 1 the effective scale is `scale · cfg`. |
+| `sigma_start`, `sigma_end` | Window. |
+| `blocks` | `mid` (middle block, default), or a list like `10-14`. |
+| `apply_to` | `cond_only` (like core PAG) or `all`. |
+
+**Start:** ZIT: scale 1.0, window 1.0 → 0.5, blocks `mid`.  Qwen: scale 0.5 (× cfg).  **Risks:** PAG tends towards
+cleaner, higher-contrast images — it can *increase* the polished look; test it last.
+
+---
+
+## 13. ZQX Activation Steering
+
+**What it does:** per step inside the window, two extra forwards with a "towards" and an "away" prompt (e.g.
+"candid, looking away" vs "posing, looking at the camera"); after the selected blocks the image hidden states are
+shifted by `alpha · (h_towards − h_away)`.  `mean` mode uses one global direction (no spatial layout transfer),
+`token` mode a per-token one.
+
+**Source:** activation addition (ActAdd, arXiv 2308.10248) applied to DiT image hidden states (double-block hook).
+
+| Parameter | Meaning |
+|---|---|
+| `towards`, `away` | Contrast prompts (text only). |
+| `alpha` | Strength (negative reverses). |
+| `sigma_start`, `sigma_end` | Window (layout steps by default: 1.0 → 0.6). |
+| `blocks` | `mid`, `all`, or a list. |
+| `mode` | `mean` or `token`. |
+| `apply_to` | `all` or `cond_only`. |
+
+**Start:** alpha 0.3–0.8, blocks `mid`, mode `mean`, window 1.0 → 0.7, pass 1 only.  **Risks:** 3× compute inside the
+window; large alpha breaks images; which blocks carry pose/gaze is unmeasured (use Block Spec to sweep).
+
+---
+
+## 14. ZQX UCE Text Edit
+
+**What it does:** closed-form edit of the text input projection (Qwen-Image `txt_in`, Z-Image `cap_embedder`): the
+`source` prompt's embedding is mapped to what the `target` prompt produces, while `keep` prompts are preserved.
+Applied as a normal weight patch.
+
+**Source:** Unified Concept Editing (UCE, arXiv 2308.14761).  We edit the input projection because in MMDiT /
+single-stream DiTs the per-block text K/V projections do not see a fixed text embedding (the text stream is updated by
+every block), unlike UNet cross-attention where UCE was proposed.
+
+| Parameter | Meaning |
+|---|---|
+| `source`, `target` | Paired prompts (one-to-one if you pass several conditionings). |
+| `pairing` | `mean` (mean token → mean token), `end` (last tokens aligned from the end), `positional` (equal lengths). |
+| `lam` | Regulariser, relative to the mean squared token norm (bigger = smaller edit). |
+| `strength` | Fraction of the edit applied (0 = no patch). |
+| `keep` (opt.) | Prompts whose embedding must not change — put your trigger word / typical scene prompts here. |
+
+**Start:** lam 0.5, strength 0.5, keep = your trigger prompt.  **Risks:** the AI look is mostly a default mode, not a
+word — expect a small effect; an aggressive edit changes unrelated prompts (check with `keep`).  The report output shows
+residuals and drift.
+
+---
+
+## 15. ZQX LoRA Surgery
+
+**What it does:** rewrites one LoRA and saves a new file (+ JSON report): per-block multipliers, drop module kinds,
+rank truncation, spectrum shaping, DARE.
+
+| Parameter | Meaning |
+|---|---|
+| `strength` | Baked-in multiplier. |
+| `block_weights` | As in Scheduled LoRA; 0 removes the weight from the file. |
+| `drop_kinds` | Comma list: `text` (Qwen text stream / Z-Image caption layers), `modulation` (adaLN / timestep layers), `attention`, `mlp`, `io`, `other`. |
+| `max_rank` | Keep at most this many singular directions per weight (0 = all). |
+| `energy_keep` | Keep the smallest rank that holds this fraction of Σσ². |
+| `spectrum_power` | σᵢ → σ₁ (σᵢ/σ₁)ᵖ; p < 1 flattens, p > 1 concentrates. `power_preserve` = keep σ₁ or ‖ΔW‖_F. |
+| `dare_drop` | DARE on the up factor (unbiased, stays exactly low rank). |
+
+**Sources:** Eckart–Young (truncation), DARE (arXiv 2311.03099), B-LoRA-style block selection (arXiv 2403.14572).
+**Start:** try `drop_kinds = modulation` and `energy_keep = 0.9` on the character LoRA, one at a time.
+**Risks:** heuristic hypotheses (e.g. "the AI look lives in the weak directions / modulation layers") — measure.
+
+## 16. ZQX LoRA Common Subspace
+
+**What it does:** for 2–4 LoRAs, per weight, the top-k left singular vectors of the summed deltas = their common
+output subspace.  `common` writes the shared component `U Uᵀ mean(ΔW)`; `clean_target` removes that subspace from a
+target LoRA.  With several character LoRAs made by the same QIE pipeline, the common part is a training-free estimate
+of the shared "AI look" (hypothesis) — though it also contains generic "person" directions.
+
+**Source:** inspired by Iso-CTS common/task-specific subspaces (arXiv 2502.04959).  **Start:** common_rank 2–4.
+The report shows how much of each LoRA's energy lies in the common subspace.
+
+## 17. ZQX Realism LoRA Ablation (identity-safe)
+
+**What it does:** with the character LoRA already on the model, measures for each **unit** of the realism LoRA (a
+block, a module kind, or a top singular direction of a block) how removing it changes
+* identity: the identity scorer (e.g. ArcFace similarity to the passport photo), averaged over the seeds;
+* realism kept: CLIP-vision cosine similarity to the full-realism baseline images;
+
+then removes the units whose removal gains ≥ `min_identity_gain` identity while costing ≤ `max_realism_drop`, evaluates
+the combination once more and writes a new realism LoRA.  If every unit qualifies, no file is written and the report
+says so.  Output images: A (no realism), C (full realism), final — one per seed.
+
+| Parameter | Meaning |
+|---|---|
+| `model` | Model **with the character LoRA applied**. |
+| `realism_lora`, `realism_strength` | The LoRA to clean and the strength you use it at (not baked into the file). |
+| `positive`, `negative`, `latent_image`, `steps`, `cfg`, `sampler_name`, `scheduler`, `seeds` | The fixed evaluation set (≥ 4 seeds). |
+| `vae`, `identity_scorer`, `clip_vision` | Decoder, identity metric (Face scorer, identity weight only), realism-similarity model. |
+| `units` | `blocks`, `kinds`, `blocks+kinds`, `blocks+svd` (then the best `svd_blocks` blocks are refined by their top `svd_components` directions). |
+| `min_identity_gain`, `max_realism_drop` | Selection thresholds. |
+
+**Cost:** (2 + #units + svd_blocks·svd_components + 1) × #seeds generations — ZIT: 30 blocks × 4 seeds ≈ 130 runs.
+**Risks:** one-at-a-time attribution (interactions only checked at the end); CLIP similarity is a coarse realism
+proxy; ArcFace measures the face only.
+
+---
+
+## 18. Scorers and ZQX Seed Search
+
+Scorer nodes output `ZQX_SCORER` (metrics + weights); **ZQX Scorer: Combine** merges up to four.
+
+| Scorer | Metrics | Notes |
+|---|---|---|
+| **Face (InsightFace)** | `face_identity` (ArcFace cosine to the reference face), `face_off_center` (0 = centred), `head_turn` (\|yaw\|/90), `face_found` | Needs `pip install insightface onnxruntime(-gpu)` and a model pack in `models/insightface/models/<buffalo_l or antelopev2>` (IPAdapter / PuLID layout).  Positive weights on off-centre / head-turn push away from the "centred, looking at camera" look. |
+| **CLIP Similarity** | cosine of CLIP-vision embeddings to reference images | Positive weight towards a real candid photo, negative away from the passport composition. |
+| **Background Sharpness** | log(var Laplacian in border band / centre) | Model-free; bokeh / studio backgrounds score low. |
+
+**ZQX Seed Search:** probes `n_candidates` seeds (starting at the NOISE seed) for `probe_steps` steps, decodes the x0
+prediction, scores the previews (each metric z-normalised across the candidates, then weighted) and fully samples the
+best `keep` seeds — each exactly what a normal run with that seed gives.  Outputs the samples, all previews, a ranked
+report and the best seed.
+
+**Source:** distilled models fix the layout in the first step (Gandikota & Bau, arXiv 2503.10637); candidate pruning
+on early predictions as in Group Inference (FLUX-schnell).  **Start (ZIT):** 16–32 candidates, probe_steps 1, keep 1–2;
+Face scorer w_identity 1.0, w_head_turn 0.5, w_off_center 0.3, w_face_found 2; + Background Sharpness 0.5.
+**Risks:** one-step previews are blurry — face detection may fail at probe_steps 1 (use 2); cost = n × probe + keep × full.
+
+---
+
+## 19. ZQX Pose Bank
+
+**What it does:** picks a control image (DWPose / OpenPose skeleton, depth map…) from
+`ComfyUI/input/<bank_folder>/<tag>/…` by seed, among files whose aspect ratio is within `aspect_tolerance` of the
+output, optionally restricted to tags (sub-folders such as `walking`, `sitting`), and crops it to the output size.
+Feed it to a ControlNet so pose and composition come from real candid photos instead of the model prior (Z-Image
+Turbo: `ModelPatchLoader` + `QwenImageDiffsynthControlnet` with the Fun ControlNet Union; that node has no step range —
+lower the strength instead).
+
+| Parameter | Meaning |
+|---|---|
+| `bank_folder` | Folder inside the input directory, or an absolute path. |
+| `tags` | Comma list of sub-folders; empty = all. |
+| `width`, `height`, `aspect_tolerance` | Target size and allowed aspect-ratio deviation (0.15 = 15 %). |
+| `resize` | `crop_to_size` (centre crop + resize) or `keep`. |
+| `seed` | Selection seed (deterministic). |
+
+**Start:** pose maps from 100+ real photos, ControlNet strength 0.5–0.7.  **Risks:** depth maps also carry the donor's
+body shape; a small bank just creates a new kind of sameness.
+
+---
+
 ## A/B test plan
 
 General rules:
@@ -323,12 +541,15 @@ General rules:
 
 Recommended order (see "Test order" in the README):
 1. Scheduled LoRA (character low early / high late; realism the opposite) — passes 1 and 2.
-2. Reference Attention (frame, window 0.9→0.3, dropout 0.4, face key_mask), then lower the character LoRA strength in
-   steps of 0.2.
-3. K-LoRA (instead of Scheduled LoRA) — compare with the same seeds.
-4. Sigma Split Guider (early negative) — pass 1.
-5. CADS (conservative) — pass 1.
-6. Conflict Report → LoRA Arithmetic (`clean_col` λ 0.5/1.0) → repeat step 1 with the generated LoRA.
-7. Low-Frequency Noise — pass 1.
+2. Seed Search with the Face + Background scorers — pass 1 (cheap way to *select* against the AI look).
+3. Realism LoRA Ablation → use the identity-safe realism LoRA in step 1.
+4. Reference Attention (frame or matched, window 0.9→0.3, dropout 0.4, face key_mask), then lower the character LoRA
+   strength in steps of 0.2.
+5. Pose Bank + ControlNet — pass 1.
+6. Spatial LoRA (realism outside the face, character on the face) — pass 2 with a face mask.
+7. K-LoRA or LoRA Guidance (instead of Scheduled LoRA) — compare with the same seeds.
+8. Sigma Split Guider (early negative), Activation Steering, CADS — pass 1, one at a time.
+9. Conflict Report → LoRA Arithmetic / Surgery / Common Subspace → repeat step 1 with the generated LoRA.
+10. Low-Frequency Noise, DiT PAG, UCE — last.
 
 After each step, fix the winning setting and then add the next lever.
