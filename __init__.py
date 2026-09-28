@@ -1,4 +1,4 @@
-"""ComfyUI-ZIT-QIE-Experimental: training-free levers for identity vs. "AI look" on
+"""ComfyUI-ZQX: training-free levers for identity vs. "AI look" on
 Z-Image Turbo, Qwen-Image 2512 and Qwen-Image-Edit 2511.  See README.md."""
 if __package__:
     # ComfyUI imports custom-node folders as packages (nodes.py::load_custom_node).
